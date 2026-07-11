@@ -2346,22 +2346,22 @@ MonoBehaviour:
   moveMarker: {fileID: 0}
   aimIndicator: {fileID: 0}
   skills:
-  - label: "\uAE30\uBCF8\uACF5\uACA9"
+  - label: "\uD608\uCC3D \uD22C\uCC99"
     key: 113
-    actionId: 9
-    cooldownKey: 
-    aimed: 0
-    range: 0
-    aoeRadius: 0
-    maxCooldown: 0
-  - label: "\uAC15\uB51C"
-    key: 119
     actionId: 10
     cooldownKey: skill
-    aimed: 0
-    range: 0
-    aoeRadius: 0
-    maxCooldown: 0
+    aimed: 1
+    range: 7
+    aoeRadius: 1.8
+    maxCooldown: 3
+  - label: "\uD608\uC6D4 \uB099\uD558"
+    key: 119
+    actionId: 18
+    cooldownKey: skill2
+    aimed: 1
+    range: 9
+    aoeRadius: 3
+    maxCooldown: 7
   - label: "\uCE74\uC6B4\uD130"
     key: 101
     actionId: 17
@@ -2369,6 +2369,14 @@ MonoBehaviour:
     aimed: 0
     range: 0
     aoeRadius: 0
+    maxCooldown: 8
+  - label: "\uAE30\uBCF8\uACF5\uACA9"
+    key: 32
+    actionId: 9
+    cooldownKey:
+    aimed: 1
+    range: 5
+    aoeRadius: 1.2
     maxCooldown: 0
   groundY: 0
   reachThreshold: 0.6
