@@ -35,6 +35,7 @@ namespace BossRaid
         private static readonly Color CCrimson   = new Color(0.85f, 0.06f, 0.12f);
         private static readonly Color CGold      = new Color(1.00f, 0.82f, 0.25f);
         private static readonly Color CCyan      = new Color(0.25f, 0.95f, 0.90f);
+        private static readonly Color CSilver    = new Color(0.90f, 0.94f, 1.00f);   // 평타 은백
 
         // ─── 텔레그래프 스텝 발동 감지 상태 ───
         // key = "pattern:step_index". turns_remaining<=1 일 때 무장(arm)하고,
@@ -165,13 +166,21 @@ namespace BossRaid
         ///   (b) 임팩트 지점에 실판정 반경 원 데칼 플래시(0.2s) — hit=true 골드/크리티컬 강조, 빗나감 옅게
         ///   (c) 임팩트 버스트 + 실반경 링
         /// 반경은 ev.radius(sim 단위)를 viewer.cellSize 로 월드 변환해 실제 판정과 일치시킨다.
-        /// skill_id: "skill"(혈창 투척 r1.8) | "skill2"(혈월 낙하 r3.0). 데미지 숫자는 별도 damage 이벤트가 처리.
+        /// skill_id: "basic"(평타 r1.2, 가벼운 은백) | "skill"(혈창 투척 r1.8) | "skill2"(혈월 낙하 r3.0).
+        /// "basic" 은 FireBasicAttack 로 분기(절제된 연출). 데미지 숫자는 별도 damage 이벤트가 처리.
         /// </summary>
         private void FirePlayerSkill(EventData ev, Vector3 bossPos)
         {
             float cell = CellSize();
             Vector3 p = ToWorld(ev.tx, ev.ty);
             float r = (ev.radius > 0f ? ev.radius : 1.8f) * cell;   // sim → 월드 반경(실판정 일치)
+
+            // 딜러 평타 설치기: Q/W 보다 가벼운 은백색 연출(스팸 가능 → 파티클 절제). 별도 처리 후 종료.
+            if (ev.skill_id == "basic")
+            {
+                FireBasicAttack(ev, p, r, bossPos);
+                return;
+            }
 
             // ── 명중/크리티컬에 따른 임팩트 데칼 강조 배선 ──
             Color decalBase; Color decalOutline; float peakAlpha;
@@ -210,6 +219,35 @@ namespace BossRaid
                     HitStopManager.HitStop(0.09f);
                     LostArkCamera.ShakeCamera(0.3f, 0.2f);
                 }
+            }
+        }
+
+        /// <summary>
+        /// 딜러 평타 설치기 임팩트 (skill_id=="basic"). Q/W 보다 절제된 은백색 연출:
+        ///   (a) 딜러→지점 소형 은백 트레일
+        ///   (b) 실판정 반경(aim_basic_radius×cellSize) 소형 임팩트 데칼 플래시(짧게)
+        ///   (c) 소량 파티클 버스트 + 명중 시 보스 소형 스파크(크리만 약한 히트스톱)
+        /// 스팸 대비: 파티클 수/지속을 낮게 유지, RingWave·카메라 셰이크 없음.
+        /// </summary>
+        private void FireBasicAttack(EventData ev, Vector3 p, float r, Vector3 bossPos)
+        {
+            // (a) 소형 은백 트레일.
+            ProceduralVFX.Trail(DealerCastOrigin(p), p, CSilver);
+
+            // (b) 명중/크리에 따른 소형 임팩트 데칼(짧은 플래시).
+            Color decalBase; Color decalOutline; float peakAlpha;
+            if (ev.hit && ev.crit)  { decalBase = CGold;   decalOutline = CGold * 2.6f;   peakAlpha = 0.7f; }
+            else if (ev.hit)        { decalBase = CSilver; decalOutline = CSilver * 1.8f; peakAlpha = 0.5f; }
+            else                    { decalBase = CCyan;   decalOutline = CCyan * 1.3f;   peakAlpha = 0.2f; }
+            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.16f);
+
+            // (c) 절제된 버스트.
+            ProceduralVFX.Burst(p, CSilver, 10, 3.5f, 0.22f, 0.3f);
+
+            if (ev.hit)
+            {
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CSilver, 8, 3.2f, 0.2f, 0.28f);
+                if (ev.crit) HitStopManager.HitStop(0.04f);   // 크리만 짧은 히트스톱(스팸 자극 최소)
             }
         }
 

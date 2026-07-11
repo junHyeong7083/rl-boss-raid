@@ -15,7 +15,8 @@ namespace BossRaid
     ///   우클릭(누름/드래그) = 지면 클릭 지점으로 이동(8방향 양자화, MOVE 1~8). 도달 시 정지.
     ///   Q = 혈창 투척(10, 조준형: AoE r1.8/사거리7/쿨3, cd "skill")
     ///   W = 혈월 낙하(18, 조준형: AoE r3.0/사거리9/쿨7, cd "skill2")
-    ///   E = 카운터(17, 즉시, cd "counter")   Space = 기본공격(9, 즉시, 쿨 없음)
+    ///   Space = 기본공격(9, 조준형: AoE r1.2/사거리5/쿨 없음, cd 없음) — 롤 논스마트키식 설치기
+    ///   E = 카운터(17, 즉시, cd "counter")
     ///   조준 중: 좌클릭 = 발사, 같은 키 재입력/Esc = 취소, 다른 조준 스킬 키 = 대상 전환,
     ///            우클릭 이동은 그대로 동작(무빙 조준).
     ///
@@ -64,7 +65,7 @@ namespace BossRaid
             new SkillBinding { label = "혈창 투척", key = KeyCode.Q,     actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 3 },
             new SkillBinding { label = "혈월 낙하", key = KeyCode.W,     actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 7 },
             new SkillBinding { label = "카운터",   key = KeyCode.E,     actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 8 },
-            new SkillBinding { label = "기본공격", key = KeyCode.Space, actionId = 9,  cooldownKey = "",        aimed = false, maxCooldown = 0 },
+            new SkillBinding { label = "기본공격", key = KeyCode.Space, actionId = 9,  cooldownKey = "",        aimed = true,  range = 5f, aoeRadius = 1.2f, maxCooldown = 0 },
         };
 
         [Header("Movement")]

@@ -349,7 +349,16 @@ class RaidEnv:
         cd = self.config.skill_cooldowns.get(int(a), 0)
 
         if a == RaidActionID.ATTACK_BASIC:
-            self._do_attack(u, skill=False)
+            if role == PartyRole.DEALER:
+                # 딜러 평타 = 롤 논스마트키식 지면 조준 설치기 (쿨 없음, 데미지=유닛 attack).
+                # Q/W 와 동일한 지면 조준 AoE 경로. aim 없으면(NPC 딜러/FSM) 보스 자동 조준.
+                self._do_aim_skill(u, "basic",
+                                   self.config.aim_basic_radius,
+                                   self.config.aim_basic_range,
+                                   u.attack, is_skill=False)
+            else:
+                # 탱커/힐러/서포터 평타 = 기존 근접 로직 유지 (FSM NPC 호환).
+                self._do_attack(u, skill=False)
         elif a == RaidActionID.ATTACK_SKILL:
             u.cooldowns[int(a)] = cd
             if role == PartyRole.DEALER:
@@ -415,13 +424,15 @@ class RaidEnv:
             self.step_events[u.uid].append({"type": "stagger_contribute", "amount": contrib})
 
     def _do_aim_skill(self, u: PartyUnit, skill_key: str,
-                      radius: float, max_range: float, damage: int):
+                      radius: float, max_range: float, damage: int,
+                      is_skill: bool = True):
         """딜러 지면 지정 AoE (로아식 설치기). 즉시 발동 — 텔레그래프 없음.
 
         - 조준점: step() 의 aim_points["p<uid>"] (sim 좌표). 없으면 보스 위치 자동 조준.
         - 사거리 밖 조준점은 사거리 경계로 클램프.
         - AoE 원 안에 보스(몸통 원 겹침) 있으면 피해. 파티원 프렌들리파이어 없음.
-        - 이벤트: player_skill_cast (Unity 폭발 VFX + 명중 표시용).
+        - 이벤트: player_skill_cast (Unity 폭발 VFX + 명중 표시용). skill 필드로 Q/W/평타 구분.
+        - is_skill: Q/W(True) vs 평타(False) — damage 이벤트 skill 플래그·스태거 기여량 구분.
         """
         aim = self._aim_points.get(f"p{u.uid}")
         if aim is None:
@@ -452,11 +463,13 @@ class RaidEnv:
             actual = self.boss.take_damage(dmg, u.uid)
             u.total_damage_dealt += actual
             if actual > 0:
-                self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": True, "crit": crit})
+                self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": is_skill, "crit": crit})
             if self.boss.stagger_active:
-                self.boss.stagger_gauge -= self.config.stagger_contrib_skill
+                contrib = (self.config.stagger_contrib_skill if is_skill
+                           else self.config.stagger_contrib_basic)
+                self.boss.stagger_gauge -= contrib
                 self.step_events[u.uid].append({"type": "stagger_contribute",
-                                                "amount": self.config.stagger_contrib_skill})
+                                                "amount": contrib})
         self.step_events[u.uid].append({
             "type": "player_skill_cast", "skill": skill_key,
             "tx": float(tx), "ty": float(ty), "radius": float(radius),

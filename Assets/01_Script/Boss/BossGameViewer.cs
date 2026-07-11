@@ -409,9 +409,9 @@ namespace BossRaid
 
         [Header("Donut Safe Zone")]
         [Tooltip("도넛 내부 안전지대 채움 컬러(초록 반투명). '여기로 들어와라' 가독용.")]
-        public Color safeZoneColor = new Color(0.2f, 1.0f, 0.4f, 0.22f);
+        public Color safeZoneColor = new Color(0.2f, 1.0f, 0.4f, 0.45f);
         [Tooltip("도넛 안전지대 HDR 테두리 컬러(초록).")]
-        public Color safeZoneOutline = new Color(0.4f, 2.6f, 0.9f, 0.9f);
+        public Color safeZoneOutline = new Color(0.5f, 3.2f, 1.1f, 1f);
 
         /// <summary>도넛 shape 의 내부 안전 구멍(r_in)을 초록 반투명 원으로 표시.</summary>
         private void RenderDonutSafeZone(ShapeData shape)
@@ -419,8 +419,9 @@ namespace BossRaid
             if (shape.r_in <= 1e-4f) return;
             var go = GetSafeZone();
             var tr = go.transform;
-            // 위험 링과 같은 중심. 위험 데칼(y+0.02)보다 살짝 아래에 둬 링 테두리를 가리지 않게.
-            tr.position = ContinuousToWorld(shape.cx, shape.cy) + Vector3.up * 0.015f;
+            // 위험 데칼(y+0.02)의 도넛 구멍 안쪽 미채움 틴트에 묻히지 않도록 "위"에 그린다.
+            // (투명 큐 정렬상 카메라에 더 가까운 쪽이 나중에 그려져 또렷하게 보임)
+            tr.position = ContinuousToWorld(shape.cx, shape.cy) + Vector3.up * 0.035f;
             float d = shape.r_in * 2f * cellSize;
             tr.localScale = new Vector3(d, d, d);
         }

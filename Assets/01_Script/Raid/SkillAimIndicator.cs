@@ -22,14 +22,18 @@ namespace BossRaid
         [Header("Look")]
         [Tooltip("지면 위로 살짝 띄우는 높이(Z-fighting 방지).")]
         [SerializeField] private float groundLift = 0.04f;
-        [Tooltip("사거리 링 베이스 컬러(금색 반투명).")]
-        [SerializeField] private Color ringColor = new Color(1f, 0.85f, 0.4f, 0.35f);
-        [Tooltip("사거리 링 HDR 테두리 컬러.")]
-        [SerializeField] private Color ringOutline = new Color(2.2f, 1.7f, 0.6f, 0.9f);
-        [Tooltip("AoE 레티클 베이스 컬러(청록 반투명).")]
-        [SerializeField] private Color reticleColor = new Color(0.2f, 0.95f, 0.9f, 0.4f);
-        [Tooltip("AoE 레티클 HDR 테두리 컬러.")]
-        [SerializeField] private Color reticleOutline = new Color(0.5f, 2.4f, 2.2f, 1f);
+        [Tooltip("사거리 링 베이스 컬러(금색 반투명). 가독성 위해 알파 상향(0.5).")]
+        [SerializeField] private Color ringColor = new Color(1f, 0.85f, 0.4f, 0.5f);
+        [Tooltip("사거리 링 HDR 테두리 컬러(강화).")]
+        [SerializeField] private Color ringOutline = new Color(2.8f, 2.1f, 0.8f, 1f);
+        [Tooltip("AoE 레티클 베이스 컬러(청록 반투명). 채움 알파 상향(0.55).")]
+        [SerializeField] private Color reticleColor = new Color(0.2f, 0.95f, 0.9f, 0.55f);
+        [Tooltip("AoE 레티클 HDR 테두리 컬러(강화).")]
+        [SerializeField] private Color reticleOutline = new Color(0.6f, 2.8f, 2.6f, 1f);
+        [Tooltip("방향선 컬러(딜러→레티클, 청록 발광 반투명).")]
+        [SerializeField] private Color dirLineColor = new Color(0.3f, 1.6f, 1.5f, 0.5f);
+        [Tooltip("방향선 두께(월드 단위).")]
+        [SerializeField] private float dirLineWidth = 0.14f;
         [Tooltip("확정 마커 베이스 컬러(청록 — 발사 순간 즉각 피드백).")]
         [SerializeField] private Color confirmColor = new Color(0.25f, 1f, 0.92f, 0.65f);
         [Tooltip("확정 마커 HDR 테두리 컬러.")]
@@ -39,6 +43,7 @@ namespace BossRaid
 
         private Transform _ring;       // 사거리 링 (딜러 중심)
         private Transform _reticle;    // AoE 레티클 (조준 지점)
+        private Transform _dirLine;    // 방향선 (딜러 → 레티클 중심)
         private float _rangeWorld;     // 사거리(월드 단위)
         private float _aoeWorld;       // AoE 실반경(월드 단위) — 확정 마커 크기 기준
         private bool _active;
@@ -56,10 +61,15 @@ namespace BossRaid
 
         private void Awake()
         {
+            // 사거리 링: 테두리 두께/알파 상향(롤 스킬샷 인디케이터 가독성).
             _ring = BuildCircleQuad("RangeRing", ringColor, ringOutline,
-                fill: 0f, outlineWidth: 0.02f, unfilledAlpha: 0.06f);
+                fill: 0f, outlineWidth: 0.045f, unfilledAlpha: 0.06f);
+            // AoE 레티클: 채움 알파/테두리 두께 상향 + 은은한 펄스.
             _reticle = BuildCircleQuad("AoeReticle", reticleColor, reticleOutline,
-                fill: 1f, outlineWidth: 0.08f, unfilledAlpha: 0.4f);
+                fill: 1f, outlineWidth: 0.12f, unfilledAlpha: 0.55f, pulse: 0.25f);
+
+            // 방향선: 딜러 위치 → 레티클 중심을 잇는 얇은 발광 선(청록).
+            _dirLine = BuildLineQuad("AimDirLine", dirLineColor);
 
             // 확정 마커: 청록 채움 원(두꺼운 테두리). 조준 종료 후에도 독립적으로 잔존하며 수축.
             _confirm = BuildCircleQuad("ConfirmMarker", confirmColor, confirmOutline,
@@ -85,6 +95,7 @@ namespace BossRaid
             _active = true;
             _ring.gameObject.SetActive(true);
             _reticle.gameObject.SetActive(true);
+            if (_dirLine != null) _dirLine.gameObject.SetActive(true);
         }
 
         /// <summary>
@@ -101,6 +112,7 @@ namespace BossRaid
             _active = false;
             if (_ring != null) _ring.gameObject.SetActive(false);
             if (_reticle != null) _reticle.gameObject.SetActive(false);
+            if (_dirLine != null) _dirLine.gameObject.SetActive(false);
         }
 
         /// <summary>
@@ -178,13 +190,34 @@ namespace BossRaid
             var p = new Vector3(dealerPos.x + d.x, groundLift, dealerPos.z + d.z);
             _reticle.position = p;
             ClampedAimPoint = new Vector3(p.x, 0f, p.z);   // 발사 좌표는 지면(y=0) 기준
+
+            UpdateDirLine(new Vector3(dealerPos.x, groundLift, dealerPos.z), p);
+        }
+
+        /// <summary>방향선(딜러→레티클) 위치/길이/회전 갱신. XZ 평면에 눕힌 얇은 Quad.</summary>
+        private void UpdateDirLine(Vector3 from, Vector3 to)
+        {
+            if (_dirLine == null) return;
+            Vector3 diff = to - from; diff.y = 0f;
+            float len = diff.magnitude;
+            if (len < 1e-3f)
+            {
+                _dirLine.gameObject.SetActive(false);
+                return;
+            }
+            if (!_dirLine.gameObject.activeSelf) _dirLine.gameObject.SetActive(true);
+            _dirLine.position = new Vector3((from.x + to.x) * 0.5f, groundLift, (from.z + to.z) * 0.5f);
+            // 로컬 +X 를 diff(XZ) 방향으로 정렬: Y축 회전 θ = -atan2(dz, dx).
+            float angDeg = Mathf.Atan2(diff.z, diff.x) * Mathf.Rad2Deg;
+            _dirLine.rotation = Quaternion.Euler(0f, -angDeg, 0f);
+            _dirLine.localScale = new Vector3(len, 1f, Mathf.Max(0.01f, dirLineWidth));
         }
 
         // ─────────────── 메시/머티리얼 생성 ───────────────
 
         /// <summary>바닥에 눕힌 1x1 원형 Quad 자식 생성(Telegraph 셰이더 circle).</summary>
         private Transform BuildCircleQuad(string name, Color baseCol, Color outlineCol,
-            float fill, float outlineWidth, float unfilledAlpha)
+            float fill, float outlineWidth, float unfilledAlpha, float pulse = 0f)
         {
             var go = new GameObject(name);
             go.transform.SetParent(transform, false);
@@ -217,7 +250,7 @@ namespace BossRaid
                 mat.SetInt("_ShapeType", 0);          // circle
                 mat.SetFloat("_Fill", fill);           // 0=링(테두리만), 1=채움
                 mat.SetFloat("_Progress", 0f);         // 은은한 펄스 유지
-                mat.SetFloat("_Pulse", 0f);
+                mat.SetFloat("_Pulse", pulse);         // 소량 펄스(레티클 강조)
                 mat.SetFloat("_OutlineWidth", outlineWidth);
                 mat.SetFloat("_UnfilledAlpha", unfilledAlpha);
                 mat.SetColor("_Color", baseCol);
@@ -227,9 +260,55 @@ namespace BossRaid
             {
                 mat.color = baseCol;
             }
+            mat.renderQueue = 3100;   // 바닥 데칼/장판 위에 그려 조준 가독성 보장
             mr.sharedMaterial = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             mr.receiveShadows = false;
+            return go.transform;
+        }
+
+        /// <summary>
+        /// 바닥(XZ)에 눕힌 얇은 선분 Quad 생성. 로컬 +X 방향으로 길이 1(scale.x=길이),
+        /// 로컬 Z 로 두께(scale.z). 청록 발광 반투명(Telegraph 셰이더 circle 재활용 —
+        /// _Fill=1/큰 UnfilledAlpha 로 균일 채움처럼 보이게, 미포함 시 Sprites/Default 폴백).
+        /// </summary>
+        private Transform BuildLineQuad(string name, Color col)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(transform, false);
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+
+            // 로컬 X∈[-0.5,0.5], Z∈[-0.5,0.5] 단위 Quad(바닥에 눕힘).
+            var mesh = new Mesh { name = name + "Quad" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, 0f, -0.5f),
+                new Vector3( 0.5f, 0f, -0.5f),
+                new Vector3( 0.5f, 0f,  0.5f),
+                new Vector3(-0.5f, 0f,  0.5f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(1f, 1f), new Vector2(0f, 1f),
+            };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+            mf.sharedMesh = mesh;
+
+            var sh = Shader.Find("Sprites/Default");
+            if (sh == null) sh = Shader.Find("Unlit/Transparent");
+            var mat = new Material(sh);
+            mat.color = col;
+            mat.renderQueue = 3100;   // 조준 요소는 바닥 데칼 위
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+
+            go.transform.localScale = new Vector3(1f, 1f, Mathf.Max(0.01f, dirLineWidth));
+            go.SetActive(false);
             return go.transform;
         }
     }

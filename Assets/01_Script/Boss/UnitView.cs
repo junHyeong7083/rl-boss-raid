@@ -93,10 +93,20 @@ namespace BossRaid
             // Dead bool 은 여기서만 소유(Update 의 매프레임 세팅 제거) — paramDead 필드로 일관 처리.
             if (!_aliveKnown || u.alive != _prevAlive)
             {
+                bool revived = _aliveKnown && u.alive && !_prevAlive;
                 _aliveKnown = true;
                 _prevAlive = u.alive;
                 if (deathEffect) deathEffect.SetActive(!u.alive);
                 SafeSetBool(paramDead, !u.alive);
+
+                // 부활: Dead=false 만으로는 사망 상태에서 못 나온다(사망 스테이트에 출구 전이가
+                // 없는 컨트롤러가 일반적) → 애니메이터를 초기 상태로 강제 리셋.
+                if (revived && animator != null)
+                {
+                    animator.Rebind();
+                    animator.Update(0f);
+                    SafeSetBool(paramDead, false);   // Rebind 가 파라미터도 초기화하므로 재보증
+                }
             }
         }
 

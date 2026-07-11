@@ -64,7 +64,7 @@ class RaidActionID(IntEnum):
     MOVE_UP_RIGHT = 6
     MOVE_DOWN_LEFT = 7
     MOVE_DOWN_RIGHT = 8
-    ATTACK_BASIC = 9
+    ATTACK_BASIC = 9        # 딜러: 지면 조준 설치기(쿨 없음) / 타 역할: 근접 평타
     ATTACK_SKILL = 10       # 딜러: Q 혈창 투척 (조준 AoE) / 타 역할: 강공격
     TAUNT = 11
     GUARD = 12
@@ -182,6 +182,10 @@ class RaidConfig:
     aim_w_radius: float = 3.0
     aim_w_range: float = 9.0
     aim_w_damage: int = 110
+    # 평타 (딜러 ATTACK_BASIC) — 롤 논스마트키식 지면 조준 설치기.
+    # 쿨 없음, 데미지는 유닛 attack 그대로(별도 상수 없음). Q/W보다 작은 반경/짧은 사거리.
+    aim_basic_radius: float = 1.2
+    aim_basic_range: float = 5.0
 
     # ── 패턴별 쿨타임 배율 (페이즈별) ──
     phase_cooldown_scale: Tuple[float, float, float] = (1.0, 0.85, 0.7)
