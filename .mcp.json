@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "unityctl": {
+      "type": "stdio",
+      "command": "unityctl-mcp",
+      "args": []
+    }
+  }
+}
