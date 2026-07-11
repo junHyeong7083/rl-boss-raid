@@ -186,6 +186,11 @@ class RaidConfig:
     # ── 패턴별 쿨타임 배율 (페이즈별) ──
     phase_cooldown_scale: Tuple[float, float, float] = (1.0, 0.85, 0.7)
 
+    # ── 패턴 간 휴식 간격 (실시간 페이싱) ──
+    # 보스가 한 패턴을 끝낸 직후 곧바로 다음 패턴을 시전하지 않도록 강제 휴식.
+    # TURN=0.3s → 5턴 = 1.5초. 그로기/무적/페이즈전환 시간과 자연 중첩(env.py).
+    pattern_gap_turns: int = 5
+
     # ── 페이즈별 패턴 가중치 (SEAL_WIPE 은 페이즈 전환 시 강제 — 여기 없음) ──
     pattern_weights: Dict[int, Dict[int, float]] = field(default_factory=lambda: {
         int(PhaseID.P1): {
@@ -226,14 +231,16 @@ class RaidConfig:
     pat_brand_escape_distance: float = 4.0
 
     # ── 카운터 돌진 기믹 ──
-    counter_window_turns: int = 3
+    # 실시간(TURN=0.3s) 기준: 3턴=0.9초는 저지 반응에 너무 짧음 → 6턴=1.8초.
+    counter_window_turns: int = 6
     counter_front_angle_deg: float = 100.0    # 보스 전방 판정 각
     counter_range: float = 2.2                # 보스 표면 + 근접 판정 거리
     counter_fail_damage_scale: float = 1.5    # 실패 시 강화 돌진 배율
 
     # ── 무력화 (스태거) ──
+    # 실시간(TURN=0.3s) 기준: 6턴=1.8초는 파티 협공에 촉박 → 10턴=3.0초.
     stagger_gauge: float = 200.0
-    stagger_window_turns: int = 6
+    stagger_window_turns: int = 10
     stagger_contrib_basic: float = 12.0
     stagger_contrib_skill: float = 25.0
     stagger_contrib_taunt: float = 35.0

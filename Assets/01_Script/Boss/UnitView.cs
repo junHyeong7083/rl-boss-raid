@@ -49,6 +49,8 @@ namespace BossRaid
         private GameObject _markInstance;
         private UnitData _latest;
         private bool _hasData;
+        private bool _prevAlive;              // 직전 생존 상태(사망/부활 전환 감지용)
+        private bool _aliveKnown;             // 생존 상태를 한 번이라도 받았는지
         private Vector3 _authPos;             // 예측 오염 없는 권위 보간 위치(transform.position 과 분리)
 
         /// <summary>예측기 계약: 예측 오프셋이 섞이지 않은 권위 렌더 위치. 첫 데이터 전에는 transform 폴백.</summary>
@@ -86,11 +88,15 @@ namespace BossRaid
             if (shieldEffect) shieldEffect.SetActive(u.buff_shield > 0);
             if (buffAtkEffect) buffAtkEffect.SetActive(u.buff_atk > 0);
 
-            // 사망
-            if (!u.alive)
+            // 사망/부활 전환 처리 (다시하기로 부활 시 Dead/deathEffect 원복이 없던 버그 수정).
+            // 매 스냅샷 SetBool 남발을 막기 위해 생존 상태가 "바뀔 때만" 적용한다.
+            // Dead bool 은 여기서만 소유(Update 의 매프레임 세팅 제거) — paramDead 필드로 일관 처리.
+            if (!_aliveKnown || u.alive != _prevAlive)
             {
-                if (deathEffect && !deathEffect.activeSelf) deathEffect.SetActive(true);
-                if (animator != null) animator.SetBool("Dead", true);
+                _aliveKnown = true;
+                _prevAlive = u.alive;
+                if (deathEffect) deathEffect.SetActive(!u.alive);
+                SafeSetBool(paramDead, !u.alive);
             }
         }
 
@@ -157,8 +163,7 @@ namespace BossRaid
             {
                 bool moving = _lerp.IsMoving(t);
                 SafeSetBool(paramIsMoving, moving);
-                if (_latest != null)
-                    SafeSetBool(paramDead, !_latest.alive);
+                // Dead bool 은 ApplySnapshot 의 생존 전환 처리에서만 세팅(중복/충돌 제거).
             }
 
             // 이동 중이면 이동 방향, 정지면 보스를 바라봄 (전투 중 자연스러움)

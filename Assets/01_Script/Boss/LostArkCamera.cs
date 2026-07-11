@@ -26,19 +26,19 @@ namespace BossRaid
 
         // ─────────────── 카메라 앵글/렌즈 ───────────────
         [Header("Camera Angle / Lens")]
-        [Tooltip("내려다보는 각도(도). 로스트아크 느낌은 55° 부근.")]
-        [SerializeField] private float pitch = 55f;
+        [Tooltip("내려다보는 각도(도). 부감 상향 — 보스(아레나 중앙)까지 화면에 담기게 62° 부근.")]
+        [SerializeField] private float pitch = 62f;
         [Tooltip("좌우 회전(요). 로스트아크는 0° 고정.")]
         [SerializeField] private float yaw = 0f;
-        [Tooltip("좁은 FOV + 먼 거리로 아이소메트릭 룩 연출.")]
-        [SerializeField] private float fov = 24f;
+        [Tooltip("넓은 시야 확보용 FOV(보스가 대부분 화면에 들어오도록 상향).")]
+        [SerializeField] private float fov = 30f;
 
         // ─────────────── 거리 / 줌 ───────────────
         [Header("Distance / Zoom")]
-        [Tooltip("기본 추적 거리(타깃 → 카메라).")]
-        [SerializeField] private float distance = 20f;
-        [SerializeField] private float minDistance = 12f;
-        [SerializeField] private float maxDistance = 28f;
+        [Tooltip("기본 추적 거리(타깃 → 카메라). 더 높고 넓은 구도용으로 상향.")]
+        [SerializeField] private float distance = 30f;
+        [SerializeField] private float minDistance = 18f;
+        [SerializeField] private float maxDistance = 44f;
         [Tooltip("마우스 휠 한 노치당 거리 변화량 배율.")]
         [SerializeField] private float zoomSpeed = 40f;
         [Tooltip("목표 거리까지 부드럽게 수렴하는 시간(초).")]
@@ -48,8 +48,8 @@ namespace BossRaid
         [Header("Follow")]
         [Tooltip("Vector3.SmoothDamp 추적 시간. 작을수록 빠르게 따라감.")]
         [SerializeField] private float smoothTime = 0.18f;
-        [Tooltip("타깃 발 위치에서 이만큼 위를 바라봄(가슴/허리 높이).")]
-        [SerializeField] private float lookAtHeightOffset = 1.0f;
+        [Tooltip("타깃 발 위치에서 이만큼 위를 바라봄(가슴/허리 높이). 부감 상향에 맞춰 소폭 상향.")]
+        [SerializeField] private float lookAtHeightOffset = 1.5f;
 
         // ─────────────── 셰이크 ───────────────
         [Header("Shake")]

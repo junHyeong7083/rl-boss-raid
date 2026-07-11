@@ -7,6 +7,9 @@ namespace BossRaid
     /// 씬 전체 조율: 스냅샷 수신 → 보스/유닛/텔레그래프 갱신.
     /// 격자 좌표 → 월드 좌표 변환 + Lerp 보간.
     /// </summary>
+    /// 
+
+
     public class BossGameViewer : MonoBehaviour
     {
         [Header("Grid → World")]
@@ -42,6 +45,7 @@ namespace BossRaid
         private readonly Dictionary<int, UnitView> _units = new Dictionary<int, UnitView>();
         private readonly List<GameObject> _decalPool = new List<GameObject>();
         private readonly List<GameObject> _chainPool = new List<GameObject>();
+        private readonly List<GameObject> _safeZonePool = new List<GameObject>();   // 도넛 내부 안전지대(초록 원)
 
         // ─────────────── V2 공유 계약 (다른 에이전트 참조) ───────────────
 
@@ -339,6 +343,8 @@ namespace BossRaid
                     float d = shape.r_out * 2f * cellSize;
                     tr.localScale = new Vector3(d, d, 1f);
                     tr.rotation = baseTilt;
+                    // 내부 안전 구멍을 초록 반투명 원으로 함께 표시("여기로 들어와라" 즉시 가독).
+                    RenderDonutSafeZone(shape);
                     break;
                 }
                 case "line":
@@ -396,6 +402,86 @@ namespace BossRaid
         {
             foreach (var d in _decalPool) d.SetActive(false);
             foreach (var c in _chainPool) c.SetActive(false);
+            foreach (var s in _safeZonePool) s.SetActive(false);   // 안전지대도 매 스냅샷 리셋(누수 방지)
+        }
+
+        // ─────────────── 도넛 안전지대(초록 원) ───────────────
+
+        [Header("Donut Safe Zone")]
+        [Tooltip("도넛 내부 안전지대 채움 컬러(초록 반투명). '여기로 들어와라' 가독용.")]
+        public Color safeZoneColor = new Color(0.2f, 1.0f, 0.4f, 0.22f);
+        [Tooltip("도넛 안전지대 HDR 테두리 컬러(초록).")]
+        public Color safeZoneOutline = new Color(0.4f, 2.6f, 0.9f, 0.9f);
+
+        /// <summary>도넛 shape 의 내부 안전 구멍(r_in)을 초록 반투명 원으로 표시.</summary>
+        private void RenderDonutSafeZone(ShapeData shape)
+        {
+            if (shape.r_in <= 1e-4f) return;
+            var go = GetSafeZone();
+            var tr = go.transform;
+            // 위험 링과 같은 중심. 위험 데칼(y+0.02)보다 살짝 아래에 둬 링 테두리를 가리지 않게.
+            tr.position = ContinuousToWorld(shape.cx, shape.cy) + Vector3.up * 0.015f;
+            float d = shape.r_in * 2f * cellSize;
+            tr.localScale = new Vector3(d, d, d);
+        }
+
+        private GameObject GetSafeZone()
+        {
+            foreach (var s in _safeZonePool)
+            {
+                if (!s.activeSelf) { s.SetActive(true); return s; }
+            }
+            var go = BuildSafeZoneQuad();
+            _safeZonePool.Add(go);
+            return go;
+        }
+
+        /// <summary>바닥(XZ)에 눕힌 초록 원형 Quad(Telegraph 셰이더 circle, _Fill=1, 낮은 알파).</summary>
+        private GameObject BuildSafeZoneQuad()
+        {
+            var go = new GameObject("DonutSafeZone");
+            go.transform.SetParent(decalsRoot != null ? decalsRoot : transform, false);
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+
+            var mesh = new Mesh { name = "SafeZoneQuad" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, 0f, -0.5f), new Vector3(0.5f, 0f, -0.5f),
+                new Vector3( 0.5f, 0f,  0.5f), new Vector3(-0.5f, 0f,  0.5f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(1f, 1f), new Vector2(0f, 1f),
+            };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+            mf.sharedMesh = mesh;
+
+            var sh = Shader.Find("BossRaid/Telegraph");
+            if (sh == null) sh = Shader.Find("Sprites/Default");
+            var mat = new Material(sh);
+            if (sh != null && sh.name == "BossRaid/Telegraph")
+            {
+                mat.SetInt("_ShapeType", 0);         // circle
+                mat.SetFloat("_Fill", 1f);            // 전체 채움(안전 영역 표식)
+                mat.SetFloat("_Progress", 1f);
+                mat.SetFloat("_Pulse", 0f);           // 안전지대는 깜빡이지 않음(차분한 초록)
+                mat.SetFloat("_OutlineWidth", 0.06f);
+                mat.SetFloat("_UnfilledAlpha", 0.6f);
+                mat.SetColor("_Color", safeZoneColor);
+                mat.SetColor("_OutlineColor", safeZoneOutline);
+            }
+            else
+            {
+                mat.color = safeZoneColor;
+            }
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            return go;
         }
 
         private GameObject GetChain()

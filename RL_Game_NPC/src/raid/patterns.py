@@ -21,6 +21,29 @@ from .shapes import RelShape, Pos
 
 Ctx = Dict  # {boss_pos, aggro_top, party(uid->pos), roles(uid->int), dealer_uid, non_tanks[...]}
 
+# ─────────────────── 텔레그래프 실시간 환산표 (TURN_SEC = 0.3s) ───────────────────
+# Unity 가 raid_streamer 를 --turn-interval 0.3 으로 구동 → 1 turn = 0.3초 실시간.
+# 사람이 보고 회피 가능하도록 telegraph_turns 를 "플레이타임(초)" 기준으로 설계한다.
+# (파이썬 step 수가 아니라 실시간 초로 봐야 함 — 사용자 요구.)
+#
+#   카테고리                              실시간 목표      turns   비고
+#   ─────────────────────────────────────────────────────────────────────────
+#   소형/근접 부채꼴(삼연발톱 각 스텝)     1.2s            4       최소 회피 여유
+#   중형 원/직선(돌진 windup,             1.5~1.8s        5~6
+#     기둥투척 각 원, 낙인)
+#   대형 AoE(대지분쇄 도넛, 회전휩쓸기,    2.1~2.4s        7~8
+#     혈흔포효)
+#
+#   패턴별 스텝 telegraph (turns × 0.3 = 초):
+#     TripleClaw   L/R/front   4 / 4 / 4          (1.2 / 1.2 / 1.2s)
+#     EarthCrush   smash/donut 5 / 7              (1.5 / 2.1s)
+#     FrenzyRush   windup      6                  (1.8s)
+#     PillarThrow  1st/rest    6 / 5              (1.8 / 1.5s, 시간차 폭격)
+#     SpinSweep    half1/half2 7 / 7              (2.1 / 2.1s)
+#     BloodRoar    donut       8                  (2.4s)
+#     CrimsonBrand brand       6                  (1.8s)
+TURN_SEC = 0.3   # Unity turn-interval (실시간 초/턴). 텔레그래프 설계 기준.
+
 
 # ─────────────────── PatternStep ───────────────────
 
@@ -63,9 +86,10 @@ class TripleClaw(PatternDef):
         r = cfg.pat_claw_range
         off = math.radians(35.0)
         return [
-            PatternStep(2, [RelShape("fan", {"angle_rel": off, "width": side, "r": r})], 34, "slash"),
-            PatternStep(2, [RelShape("fan", {"angle_rel": -off, "width": side, "r": r})], 34, "slash"),
-            PatternStep(2, [RelShape("fan", {"angle_rel": 0.0, "width": front, "r": r * 1.15})], 48, "slash"),
+            # 소형/근접 부채꼴 → 1.2s = 4턴 (각 스텝 독립 예고)
+            PatternStep(4, [RelShape("fan", {"angle_rel": off, "width": side, "r": r})], 34, "slash"),
+            PatternStep(4, [RelShape("fan", {"angle_rel": -off, "width": side, "r": r})], 34, "slash"),
+            PatternStep(4, [RelShape("fan", {"angle_rel": 0.0, "width": front, "r": r * 1.15})], 48, "slash"),
         ]
 
 
@@ -75,8 +99,9 @@ class EarthCrush(PatternDef):
 
     def build(self, cfg, rng, ctx, target_uid):
         return [
-            PatternStep(3, [RelShape("circle", {"fwd": 0.0, "lat": 0.0, "r": cfg.pat_earth_center_r})], 42, "smash"),
-            PatternStep(2, [RelShape("donut", {"r_in": cfg.pat_earth_donut_in, "r_out": cfg.pat_earth_donut_out})], 46, "shock"),
+            # 중형 중심 원 → 1.5s = 5턴, 대형 충격파 도넛 → 2.1s = 7턴
+            PatternStep(5, [RelShape("circle", {"fwd": 0.0, "lat": 0.0, "r": cfg.pat_earth_center_r})], 42, "smash"),
+            PatternStep(7, [RelShape("donut", {"r_in": cfg.pat_earth_donut_in, "r_out": cfg.pat_earth_donut_out})], 46, "shock"),
         ]
 
 
@@ -88,8 +113,9 @@ class FrenzyRush(PatternDef):
         diag = math.hypot(cfg.map_width, cfg.map_height)
         hw = cfg.pat_rush_width * 0.5
         # 단일 스텝: 직선 텔레그래프 → 발동 시 보스가 돌진 (kind=rush_dash)
+        # 중형 직선 돌진 windup → 1.8s = 6턴 (고피해라 반응 여유 확보)
         return [
-            PatternStep(4, [RelShape("line", {"angle_rel": 0.0, "hw": hw, "length": diag, "start": 0.0})],
+            PatternStep(6, [RelShape("line", {"angle_rel": 0.0, "hw": hw, "length": diag, "start": 0.0})],
                         70, "rush", kind="rush_dash", extra={"enhanced": False}),
         ]
 
@@ -114,7 +140,9 @@ class PillarThrow(PatternDef):
             centers.append((cx, cy))
         steps: List[PatternStep] = []
         for i, (cx, cy) in enumerate(centers):
-            tel = 3 if i == 0 else 1   # 1턴 간격 시간차 폭격
+            # 중형 원 시간차 폭격: 첫 원 1.8s=6턴, 후속 원 1.5s=5턴
+            # (스텝은 순차 진행 → 각 원이 5턴 간격으로 착탄, 각 예고 최소 1.5s 회피 여유)
+            tel = 6 if i == 0 else 5
             shp = RelShape("circle", {"cx": cx, "cy": cy, "r": cfg.pat_throw_radius}, world=True)
             steps.append(PatternStep(tel, [shp], 44, "throw"))
         return steps
@@ -127,9 +155,10 @@ class SpinSweep(PatternDef):
     def build(self, cfg, rng, ctx, target_uid):
         r = cfg.pat_spin_radius
         half = math.pi   # 반원 (full angle = 180°)
+        # 대형 회전 휩쓸기 → 각 반원 2.1s = 7턴
         return [
-            PatternStep(2, [RelShape("fan", {"angle_rel": 0.0, "width": half, "r": r})], 40, "spin"),
-            PatternStep(2, [RelShape("fan", {"angle_rel": math.pi, "width": half, "r": r})], 40, "spin"),
+            PatternStep(7, [RelShape("fan", {"angle_rel": 0.0, "width": half, "r": r})], 40, "spin"),
+            PatternStep(7, [RelShape("fan", {"angle_rel": math.pi, "width": half, "r": r})], 40, "spin"),
         ]
 
 
@@ -138,8 +167,9 @@ class BloodRoar(PatternDef):
         super().__init__(PatternID.BLOOD_ROAR, "BloodRoar", cooldown=8, face_toward_target=False)
 
     def build(self, cfg, rng, ctx, target_uid):
+        # 대형 도넛 AoE(몸쪽 안전) → 2.4s = 8턴
         return [
-            PatternStep(5, [RelShape("donut", {"r_in": cfg.pat_roar_in, "r_out": cfg.pat_roar_out})],
+            PatternStep(8, [RelShape("donut", {"r_in": cfg.pat_roar_in, "r_out": cfg.pat_roar_out})],
                         90, "roar"),
         ]
 
@@ -160,6 +190,7 @@ class CrimsonBrand(PatternDef):
         party = ctx.get("party", {})
         tp = party.get(target_uid, ctx.get("boss_pos", (10.0, 10.0)))
         shp = RelShape("circle", {"cx": tp[0], "cy": tp[1], "r": cfg.pat_brand_radius}, world=True)
+        # 낙인(표식 산개) → 1.8s = 6턴 (산개 회피 여유 확보)
         return [
             PatternStep(6, [shp], 80, "brand", kind="brand",
                         extra={"target_uid": target_uid}),

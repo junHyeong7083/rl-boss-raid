@@ -80,6 +80,8 @@ class RaidEnv:
         self._prev_boss_pos: Tuple[float, float] = (0.0, 0.0)
         self._counter_success = False
         self._aim_points: Dict[str, Tuple[float, float]] = {}
+        # 패턴 종료 후 강제 휴식 카운터(실시간 페이싱). >0 이면 신규 패턴 시전 보류.
+        self._pattern_gap_remaining = 0
 
         self.reset()
 
@@ -118,6 +120,7 @@ class RaidEnv:
         self.victory = False
         self.step_events.clear()
         self._counter_success = False
+        self._pattern_gap_remaining = 0
         self.units.clear()
 
         # 기둥 (고정 4개)
@@ -165,6 +168,8 @@ class RaidEnv:
         self.step_events = {uid: [] for uid in self.units}
         self.current_step += 1
         self._counter_success = False
+        # 이번 턴 시작 시 패턴 진행 여부 (종료 감지용 — 패턴 간 휴식 gap 트리거).
+        had_pattern = self.boss.active_pattern is not None
 
         # 1. 페이즈 전이 처리 (상용 페이싱)
         #    - P1→P2 (HP 75%): phase_clear 이벤트만. 전멸기 없음.
@@ -192,8 +197,16 @@ class RaidEnv:
         # 3. 보스 패턴 구동 (임팩트 — 가드 버프 이미 세팅됨)
         self._tick_boss_pattern()
 
-        # 4. 보스 idle → 신규 패턴 시전
-        if (self.boss.active_pattern is None and not self.boss.is_incapacitated()):
+        # 3.5. 패턴이 이번 턴에 종료됐으면 휴식 gap 시작 (실시간 페이싱).
+        #      페이즈 전환으로 패턴이 취소된 경우도 자연 포함(had_pattern 기록 시점이 전환 이전).
+        #      카운터 실패 → 즉시 강화 돌진처럼 곧바로 새 패턴이 세팅된 경우는 active 가
+        #      여전히 non-None 이라 gap 이 걸리지 않음(의도된 연계).
+        if had_pattern and self.boss.active_pattern is None:
+            self._pattern_gap_remaining = cfg.pattern_gap_turns
+
+        # 4. 보스 idle → 신규 패턴 시전 (단, 휴식 gap 소진 후에만)
+        if (self.boss.active_pattern is None and not self.boss.is_incapacitated()
+                and self._pattern_gap_remaining <= 0):
             pid = self.boss.select_pattern()
             if pid is not None:
                 self._start_pattern(pid)
@@ -220,6 +233,10 @@ class RaidEnv:
             if u.marked_turns > 0: u.marked_turns -= 1
             for k in list(u.cooldowns.keys()):
                 u.cooldowns[k] = max(0, u.cooldowns[k] - 1)
+
+        # 7.5. 패턴 간 휴식 gap 카운트다운 (무조건 — 그로기/무적/페이즈전환 시간과 자연 중첩).
+        if self._pattern_gap_remaining > 0:
+            self._pattern_gap_remaining -= 1
 
         # 8. 보스 end-of-turn
         self.boss.tick_end_of_turn()

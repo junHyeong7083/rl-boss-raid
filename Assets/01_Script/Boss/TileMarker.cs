@@ -66,6 +66,10 @@ namespace BossRaid
         private int _cachedPattern = -1;
         private int _cachedTotal = 0;
 
+        // ApplyShape에서 세팅한 shape 종류(0=circle 1=fan 2=line 3=cross 4=donut).
+        // 도넛(내부 안전)은 대비 강화를 적용하지 않고, 일반 장판만 위험 대비를 올린다.
+        private int _lastShapeType = 0;
+
         private Material EnsureMat()
         {
             if (rend == null) rend = GetComponentInChildren<Renderer>();
@@ -118,6 +122,7 @@ namespace BossRaid
                     break;
             }
 
+            _lastShapeType = shapeType;
             m.SetInt("_ShapeType", shapeType);
             m.SetFloat("_FanWidthRad", fanHalf);
             m.SetFloat("_SafeMask", safeMask);
@@ -154,7 +159,11 @@ namespace BossRaid
             _fillSpeed = (1f / Mathf.Max(1, total)) / Mathf.Max(0.01f, turnSeconds);
 
             // 테두리 HDR 색 = 패턴 색 × 강도 (블룸용). 알파는 1로 고정.
-            Color outCol = baseCol * outlineIntensity;
+            // 일반 장판(도넛 외)은 위험 대비 강화: 진행도(fill)가 오를수록 테두리 대비를 소폭 상향
+            // (발동 임박일수록 테두리가 더 강하게 튀도록). 도넛은 내부가 안전이라 대비를 올리지 않음.
+            bool isDonut = _lastShapeType == 4;
+            float contrast = isDonut ? 1f : Mathf.Lerp(1f, 1.25f, fill);
+            Color outCol = baseCol * (outlineIntensity * contrast);
             outCol.a = 1f;
 
             m.SetColor("_Color", baseCol);

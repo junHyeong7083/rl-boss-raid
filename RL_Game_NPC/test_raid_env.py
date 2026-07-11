@@ -156,7 +156,8 @@ def test_guard_deal_time():
     env.config.skill_cooldowns[int(RaidActionID.GUARD)] = 0  # 매 턴 가드 가능하게
     env.force_pattern(PatternID.TRIPLE_CLAW)
     guard_ok = False
-    for _ in range(8):
+    # TripleClaw 3스텝 × 4턴 = 12턴. 전방 유닛은 마지막(front) 스텝(턴 12)에 피격 → 여유 있게 반복.
+    for _ in range(16):
         actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
         actions[f"p{tank_uid}"] = int(RaidActionID.GUARD)
         # 탱커는 계속 제자리 유지 위해 GUARD (이동X)
@@ -200,7 +201,7 @@ def test_counter_fail_rush():
     env.force_pattern(PatternID.COUNTER_RUSH)
     fail_seen = False
     enhanced = False
-    for _ in range(6):
+    for _ in range(env.config.counter_window_turns + 2):
         actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
         env.step(actions)
         if any(e.get("type") == "counter_fail" for e in _collect_events(env)):

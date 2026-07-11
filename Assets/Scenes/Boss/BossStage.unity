@@ -3208,16 +3208,16 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   viewer: {fileID: 308558842}
-  pitch: 55
+  pitch: 62
   yaw: 0
-  fov: 24
-  distance: 20
-  minDistance: 12
-  maxDistance: 28
+  fov: 30
+  distance: 30
+  minDistance: 18
+  maxDistance: 44
   zoomSpeed: 40
   zoomSmoothing: 0.12
   smoothTime: 0.18
-  lookAtHeightOffset: 1
+  lookAtHeightOffset: 1.5
   shakeFrequency: 25
 --- !u!1 &1708866269
 GameObject:

@@ -34,6 +34,7 @@ namespace BossRaid
         private static readonly Color COrange    = new Color(1.00f, 0.55f, 0.16f);
         private static readonly Color CCrimson   = new Color(0.85f, 0.06f, 0.12f);
         private static readonly Color CGold      = new Color(1.00f, 0.82f, 0.25f);
+        private static readonly Color CCyan      = new Color(0.25f, 0.95f, 0.90f);
 
         // ─── 텔레그래프 스텝 발동 감지 상태 ───
         // key = "pattern:step_index". turns_remaining<=1 일 때 무장(arm)하고,
@@ -159,35 +160,159 @@ namespace BossRaid
         }
 
         /// <summary>
-        /// 설치기 스킬 시전 이펙트 (type=="player_skill_cast").
-        /// skill_id: "skill"(혈창 투척 r1.8) | "skill2"(혈월 낙하 r3.0).
-        /// hit=true 면 보스 명중 강조 스파크 추가. 데미지 숫자는 별도 damage 이벤트가 처리.
+        /// 설치기 스킬 시전 이펙트 (type=="player_skill_cast"). 로아식 "지점 발동" 가독성:
+        ///   (a) 시전자(딜러)→지점 투사체 트레일   (skill2 는 하늘 낙하)
+        ///   (b) 임팩트 지점에 실판정 반경 원 데칼 플래시(0.2s) — hit=true 골드/크리티컬 강조, 빗나감 옅게
+        ///   (c) 임팩트 버스트 + 실반경 링
+        /// 반경은 ev.radius(sim 단위)를 viewer.cellSize 로 월드 변환해 실제 판정과 일치시킨다.
+        /// skill_id: "skill"(혈창 투척 r1.8) | "skill2"(혈월 낙하 r3.0). 데미지 숫자는 별도 damage 이벤트가 처리.
         /// </summary>
         private void FirePlayerSkill(EventData ev, Vector3 bossPos)
         {
+            float cell = CellSize();
             Vector3 p = ToWorld(ev.tx, ev.ty);
-            float r = ev.radius > 0f ? ev.radius : 1.8f;
+            float r = (ev.radius > 0f ? ev.radius : 1.8f) * cell;   // sim → 월드 반경(실판정 일치)
+
+            // ── 명중/크리티컬에 따른 임팩트 데칼 강조 배선 ──
+            Color decalBase; Color decalOutline; float peakAlpha;
+            if (ev.hit && ev.crit)  { decalBase = CGold; decalOutline = CGold * 3.2f;  peakAlpha = 0.9f; }
+            else if (ev.hit)        { decalBase = CGold; decalOutline = CGold * 2.2f;  peakAlpha = 0.6f; }
+            else                    { decalBase = CCyan; decalOutline = CCyan * 1.6f;  peakAlpha = 0.28f; } // 빗나감 옅게
 
             if (ev.skill_id == "skill2")
             {
-                // 혈월 낙하: 하늘에서 떨어지는 느낌 — 낙하 스트릭(y+3 → 지면) + 지면 대형 폭발.
+                // 혈월 낙하: (a) 하늘에서 떨어지는 낙하 스트릭(y+3 → 지면).
                 ProceduralVFX.Trail(p + Vector3.up * 3f, p, CCrimson);
                 ProceduralVFX.Burst(p, CCrimson, 44, 8f, 0.5f, 0.55f);
-                ProceduralVFX.RingWave(p, CCrimson, r, 0.45f);
-                ProceduralVFX.Debris(p, CBrown);           // 파편 약간
+                ProceduralVFX.RingWave(p, CCrimson, r, 0.45f);   // (c) 실반경 링
+                ProceduralVFX.Debris(p, CBrown);
                 LostArkCamera.ShakeCamera(0.35f, 0.25f);
             }
             else
             {
-                // 혈창 투척: 금색-진홍 중형 버스트 + 반경 링.
+                // 혈창 투척: (a) 시전자(딜러)→지점 투사체 트레일 + 금색-진홍 중형 버스트.
+                ProceduralVFX.Trail(DealerCastOrigin(p), p, CCrimson);
                 ProceduralVFX.Burst(p, CGold, 26, 6f, 0.4f, 0.45f);
                 ProceduralVFX.Burst(p, CCrimson, 16, 4.5f, 0.35f, 0.4f);
-                ProceduralVFX.RingWave(p, CGold, r, 0.35f);
+                ProceduralVFX.RingWave(p, CGold, r, 0.35f);       // (c) 실반경 링
             }
 
-            // 보스 명중 강조 스파크.
+            // (b) 임팩트 실판정 반경 데칼 플래시(0.2s).
+            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.2f);
+
+            // 보스 명중 강조: 스파크 + (크리티컬이면) 히트스톱/셰이크.
             if (ev.hit)
+            {
                 ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CGold, 20, 5f, 0.3f, 0.35f);
+                if (ev.crit)
+                {
+                    ProceduralVFX.Burst(p, CGold, 28, 7f, 0.4f, 0.4f);
+                    HitStopManager.HitStop(0.09f);
+                    LostArkCamera.ShakeCamera(0.3f, 0.2f);
+                }
+            }
+        }
+
+        /// <summary>혈창 투척의 투사체 시작점(딜러 손 높이). 딜러 미탐색 시 지점 상공으로 폴백.</summary>
+        private Vector3 DealerCastOrigin(Vector3 fallbackPoint)
+        {
+            if (viewer != null && viewer.TryGetDealerTransform(out var t) && t != null)
+                return t.position + Vector3.up * 1.0f;
+            return fallbackPoint + Vector3.up * 1.5f;
+        }
+
+        // ─────────────── 임팩트 반경 데칼 플래시 ───────────────
+
+        /// <summary>
+        /// 임팩트 지점에 실판정 반경 크기의 원 데칼을 dur 초간 밝게 플래시(페이드아웃 후 자동 파괴).
+        /// BossRaid/Telegraph 셰이더 circle(_Fill=1) 재활용. 셰이더 미포함 시 Sprites/Default 폴백.
+        /// </summary>
+        private void FlashImpactDecal(Vector3 pos, float worldRadius, Color baseCol, Color outlineCol,
+            float peakAlpha, float dur)
+        {
+            var go = BuildCircleDecal(pos, worldRadius, baseCol, outlineCol, out var mat);
+            StartCoroutine(ImpactDecalRoutine(go, mat, baseCol, outlineCol, peakAlpha, Mathf.Max(0.05f, dur)));
+        }
+
+        private System.Collections.IEnumerator ImpactDecalRoutine(GameObject go, Material mat,
+            Color baseCol, Color outlineCol, float peakAlpha, float dur)
+        {
+            float t = 0f;
+            while (go != null && t < dur)
+            {
+                float k = t / dur;
+                float a = peakAlpha * (1f - k * k);   // 빠른 감쇠
+                if (mat != null)
+                {
+                    Color b = baseCol; b.a = a;
+                    Color o = outlineCol; o.a = a;
+                    mat.SetColor("_Color", b);
+                    mat.SetColor("_OutlineColor", o);
+                }
+                t += Time.deltaTime;
+                yield return null;
+            }
+            if (go != null) Destroy(go);
+        }
+
+        /// <summary>바닥에 눕힌 원형 Quad 데칼 GO 생성(Telegraph 셰이더 circle, _Fill=1).</summary>
+        private GameObject BuildCircleDecal(Vector3 pos, float worldRadius, Color baseCol, Color outlineCol,
+            out Material mat)
+        {
+            var go = new GameObject("VFX_ImpactDecal");
+            go.transform.SetParent(transform, false);
+            float d = Mathf.Max(0.02f, worldRadius * 2f);
+            go.transform.position = new Vector3(pos.x, 0.03f, pos.z);
+            go.transform.localScale = new Vector3(d, d, d);
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+            mf.sharedMesh = GroundCircleMesh();
+
+            var sh = Shader.Find("BossRaid/Telegraph");
+            if (sh == null) sh = Shader.Find("Sprites/Default");
+            mat = new Material(sh);
+            if (sh != null && sh.name == "BossRaid/Telegraph")
+            {
+                mat.SetInt("_ShapeType", 0);       // circle
+                mat.SetFloat("_Fill", 1f);
+                mat.SetFloat("_Progress", 1f);
+                mat.SetFloat("_Pulse", 0f);
+                mat.SetFloat("_OutlineWidth", 0.10f);
+                mat.SetFloat("_UnfilledAlpha", 0.8f);
+                mat.SetColor("_Color", baseCol);
+                mat.SetColor("_OutlineColor", outlineCol);
+            }
+            else
+            {
+                mat.color = baseCol;
+            }
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            return go;
+        }
+
+        // 바닥(XZ)에 눕힌 1x1 Quad 메시(재사용 캐시). Telegraph 셰이더 UV 원과 호환.
+        private static Mesh _groundCircleMesh;
+        private static Mesh GroundCircleMesh()
+        {
+            if (_groundCircleMesh != null) return _groundCircleMesh;
+            var mesh = new Mesh { name = "RaidVFX_GroundCircleQuad" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, 0f, -0.5f), new Vector3(0.5f, 0f, -0.5f),
+                new Vector3( 0.5f, 0f,  0.5f), new Vector3(-0.5f, 0f,  0.5f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(1f, 1f), new Vector2(0f, 1f),
+            };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+            _groundCircleMesh = mesh;
+            return mesh;
         }
 
         /// <summary>기둥 파괴 지점 돌 파편(정적 이벤트 구독).</summary>
@@ -338,6 +463,9 @@ namespace BossRaid
 
         private Vector3 ToWorld(float x, float y)
             => viewer != null ? viewer.ContinuousToWorld(x, y) : new Vector3(x, 0f, y);
+
+        /// <summary>sim 단위 → 월드 단위 스케일(반경 변환). viewer 없으면 1.</summary>
+        private float CellSize() => viewer != null ? viewer.cellSize : 1f;
 
         private void Flash(Color c, float dur)
         {

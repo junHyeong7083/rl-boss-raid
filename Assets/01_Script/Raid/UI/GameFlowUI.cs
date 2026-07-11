@@ -169,16 +169,19 @@ namespace BossRaid
         // ── RaidSession 이벤트 (메인스레드) ──
         private void HandleReady()
         {
-            // ready 수신 → 에피소드 시작 요청
-            Debug.Log("[GameFlowUI] ready 수신 → start 전송");
-            RaidSession.Instance?.SendCmd("start");
+            // ready 수신 = Python 로드 완료(아직 스텝 안 돌림). 여기서 바로 start 를 보내지 않고
+            // 카운트다운(3-2-1)부터 연출한 뒤, 카운트다운 종료 순간에 start 를 전송한다.
+            // → 전투/입력이 카운트다운 이전에 시작되던 문제 해결.
+            Debug.Log("[GameFlowUI] ready 수신 → Countdown");
+            StartCountdown();
         }
 
         private void HandleStarted()
         {
-            // started 수신 → 카운트다운 연출 후 Playing (InputEnabled는 이미 true)
-            Debug.Log("[GameFlowUI] started 수신 → Countdown");
-            StartCountdown();
+            // started 수신 → 이제부터 전투(InputEnabled 는 RaidSession 이 started 에서 true 로 세팅).
+            // 카운트다운은 이미 끝난 상태이므로 오버레이만 걷어내고 Playing 진입.
+            Debug.Log("[GameFlowUI] started 수신 → Playing");
+            SetState(FlowState.Playing);
         }
 
         private void HandleEpisodeEnd(string result, int steps, float duration)
@@ -212,7 +215,13 @@ namespace BossRaid
                 }
             }
             _countText.rectTransform.localScale = Vector3.one;
-            SetState(FlowState.Playing);
+            _countText.text = ""; // 카운트다운 종료 — 숫자 지움(오버레이는 투명)
+
+            // 카운트다운이 "끝난 뒤"에 전투 시작 요청.
+            // Python 은 start 를 받기 전까지 스텝을 돌지 않으므로, 이 순간부터 실제 전투가 시작된다.
+            // started 수신 시 HandleStarted 에서 Playing 진입 + InputEnabled=true.
+            Debug.Log("[GameFlowUI] 카운트다운 종료 → start 전송");
+            RaidSession.Instance?.SendCmd("start");
         }
 
         // ── Result ──
@@ -240,9 +249,9 @@ namespace BossRaid
 
         private void OnClickRetry()
         {
-            // 다시하기: start 재전송 → started 수신 시 Countdown 재진입
-            SetState(FlowState.Playing); // 오버레이 제거 후 started 대기
-            RaidSession.Instance?.SendCmd("start");
+            // 다시하기: 최초 시작과 동일한 순서 보장 —
+            // 카운트다운(3-2-1) → 종료 순간 start 전송 → started 수신 시 Playing + InputEnabled=true.
+            StartCountdown();
         }
 
         private void OnClickToTitle()
