@@ -58,6 +58,56 @@ class PatternStep:
     extra: Dict = field(default_factory=dict)
 
 
+# ─────────────────── 타겟 선택 헬퍼 (플레이어 편향) ───────────────────
+
+def alive_dealer_uid(rng: random.Random, ctx: Ctx) -> Optional[int]:
+    """살아있는 딜러(role==DEALER) uid. 없으면 None.
+
+    ctx['party'] 는 살아있는 유닛만 담고(env._build_ctx), ctx['roles'] 로 역할을 판정.
+    통상 딜러는 1명(player_slot)이지만 다중 딜러 대비 랜덤 선택.
+    """
+    party = ctx.get("party", {})
+    roles = ctx.get("roles", {})
+    dealers = [uid for uid in party if roles.get(uid) == int(PartyRole.DEALER)]
+    if dealers:
+        return rng.choice(dealers)
+    # roles 가 없을 때의 폴백: 명시된 dealer_uid 가 살아있으면 사용
+    duid = ctx.get("dealer_uid")
+    if duid is not None and duid in party:
+        return duid
+    return None
+
+
+def pick_aimed_target(cfg: RaidConfig, rng: random.Random, ctx: Ctx,
+                      bias: float, fallback=None) -> Optional[int]:
+    """조준형 패턴의 타깃 uid 선택.
+
+    bias 확률로 살아있는 딜러(플레이어)를 직접 조준한다. 딜러가 없거나 확률에
+    걸리지 않으면 fallback()(기본 = 어그로 top)으로 폴백 → 기존 조준 로직 보존.
+    """
+    if bias > 0.0 and rng.random() < bias:
+        duid = alive_dealer_uid(rng, ctx)
+        if duid is not None:
+            return duid
+    if fallback is not None:
+        return fallback()
+    return ctx.get("aggro_top")
+
+
+def pick_counter_target(cfg: RaidConfig, rng: random.Random, ctx: Ctx) -> Optional[int]:
+    """카운터 돌진(COUNTER_RUSH) 전용 타깃 선택 — 플레이어 편향을 더 높게 적용.
+
+    카운터는 딜러(E) 전용 저지 기믹이므로 pat_counter_player_bias(기본 0.6)로
+    플레이어를 자주 조준해 저지 상황을 유도한다. 딜러 사망 시 어그로 top 폴백.
+
+    주의: 현재 카운터 시전 타깃 락은 boss.start_counter(read-only)에서 top_aggro
+    로 직접 처리한다. 이 헬퍼는 카운터 조준을 플레이어 편향으로 라우팅하기 위한
+    공용 진입점으로, boss.start_counter 가 top_aggro_uid() 대신 이 함수를
+    호출하도록 한 줄만 바꾸면 편향이 활성화된다.
+    """
+    return pick_aimed_target(cfg, rng, ctx, cfg.pat_counter_player_bias)
+
+
 # ─────────────────── PatternDef ───────────────────
 
 @dataclass
@@ -68,8 +118,12 @@ class PatternDef:
     face_toward_target: bool = True   # facing 을 target 방향으로 락할지
 
     def pick_target(self, cfg: RaidConfig, rng: random.Random, ctx: Ctx) -> Optional[int]:
-        """이 패턴이 바라볼(그리고 조준할) 타깃 uid. 기본 = 어그로 top."""
-        return ctx.get("aggro_top")
+        """이 패턴이 바라볼(그리고 조준할) 타깃 uid.
+
+        pat_target_player_bias 확률로 살아있는 딜러(플레이어)를 직접 조준,
+        아니면 어그로 top(기존 로직). 딜러 사망 시 어그로 top 폴백.
+        """
+        return pick_aimed_target(cfg, rng, ctx, cfg.pat_target_player_bias)
 
     def build(self, cfg: RaidConfig, rng: random.Random, ctx: Ctx,
               target_uid: Optional[int]) -> List[PatternStep]:
@@ -179,11 +233,15 @@ class CrimsonBrand(PatternDef):
         super().__init__(PatternID.CRIMSON_BRAND, "CrimsonBrand", cooldown=8, face_toward_target=False)
 
     def pick_target(self, cfg, rng, ctx):
-        non_tanks = ctx.get("non_tanks", [])
-        if non_tanks:
-            return rng.choice(non_tanks)
-        party = list(ctx.get("party", {}).keys())
-        return rng.choice(party) if party else None
+        # 플레이어 편향 우선, 폴백은 기존 로직(비탱커 중 랜덤 → 파티 중 랜덤).
+        def _fallback():
+            non_tanks = ctx.get("non_tanks", [])
+            if non_tanks:
+                return rng.choice(non_tanks)
+            party = list(ctx.get("party", {}).keys())
+            return rng.choice(party) if party else None
+        return pick_aimed_target(cfg, rng, ctx, cfg.pat_target_player_bias,
+                                 fallback=_fallback)
 
     def build(self, cfg, rng, ctx, target_uid):
         # 표식 대상 중심 원. env 가 매 턴 대상 위치로 shape 를 갱신(follow).

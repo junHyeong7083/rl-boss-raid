@@ -106,6 +106,12 @@ namespace BossRaid
                 if (ev == null || string.IsNullOrEmpty(ev.type)) continue;
                 if (ev.type != "damage" && ev.type != "damage_taken" && ev.type != "heal") continue;
 
+                // 보스에 준 피해(damage)는 플레이어 딜러(uid 0)의 것만 표시한다.
+                // env 는 damage 이벤트를 공격자 uid 로 키잉하므로 ev.uid==0 이 곧 플레이어.
+                // NPC 3인의 자동 전투 데미지 숫자 스팸을 막고 플레이어 기여를 가시화하기 위함.
+                // damage_taken(피격)/heal 은 기존 동작 유지(파티 전체 표시).
+                if (ev.type == "damage" && ev.uid != 0) continue;
+
                 if (!TryResolveWorld(ev, snap, out var world)) continue;
 
                 SpawnFor(ev, world + Vector3.up * SpawnHeight);

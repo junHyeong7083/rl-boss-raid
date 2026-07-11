@@ -197,6 +197,7 @@ namespace BossRaid
         private FloatingTextManager _floating;
         private CounterAlertUI _counter;
         private SealAlertUI _seal;
+        private GimmickGuideUI _gimmick;
 
         private bool _subscribed;
 
@@ -213,11 +214,13 @@ namespace BossRaid
             _floating = CreateChild<FloatingTextManager>("FloatingText");
             _counter  = CreateChild<CounterAlertUI>("CounterAlert");
             _seal     = CreateChild<SealAlertUI>("SealAlert");
+            _gimmick  = CreateChild<GimmickGuideUI>("GimmickGuide");
 
             _party.Build(_canvas, _font);
             _floating.Build(_canvas, _canvasRect, _font, viewer);
             _counter.Build(_canvas, _font);
             _seal.Build(_canvas, _font);
+            _gimmick.Build(_canvas, _font);
         }
 
         private void OnEnable()
@@ -372,6 +375,7 @@ namespace BossRaid
             if (_floating != null) _floating.OnSnapshot(snap);
             if (_counter != null)  _counter.OnSnapshot(snap);
             if (_seal != null)     _seal.OnSnapshot(snap);
+            if (_gimmick != null)  _gimmick.OnSnapshot(snap);
         }
 
         private void UpdateBossBar(BossSnapshot snap)

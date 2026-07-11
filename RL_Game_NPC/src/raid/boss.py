@@ -12,7 +12,7 @@ import math
 import random
 
 from .config import RaidConfig, PatternID, PhaseID
-from .patterns import PatternStep, PatternDef, PATTERN_REGISTRY, GIMMICK_COOLDOWNS
+from .patterns import PatternStep, PatternDef, PATTERN_REGISTRY, GIMMICK_COOLDOWNS, pick_counter_target
 from .shapes import Shape, Pos, bake_shapes
 
 
@@ -226,7 +226,8 @@ class Boss:
         return ap
 
     def start_counter(self, ctx: Dict):
-        target_uid = self.top_aggro_uid()
+        # 카운터는 딜러(E) 전용 저지 기믹 — 플레이어 편향 타깃(pat_counter_player_bias)으로 저지 상황 유도.
+        target_uid = pick_counter_target(self.config, self.rng, ctx)
         target_pos = ctx.get("party", {}).get(target_uid) if target_uid is not None else None
         facing = self._lock_facing(target_pos, True)
         self.counter_window_turns = self.config.counter_window_turns

@@ -134,6 +134,15 @@ class RaidConfig:
     aggro_damage_weight: float = 1.0
     aggro_taunt_bonus: float = 200.0
 
+    # ── 타겟 편향 (플레이어 압박/참여 유도) ──
+    # 조준형(타겟 지정) 패턴이 어그로 대상(보통 탱커) 대신 플레이어(딜러)를 직접
+    # 조준할 확률. "서 있으면 맞는다"는 압박을 만들어 플레이어의 회피·포지셔닝
+    # 참여를 강제한다. 살아있는 딜러가 없으면 기존 어그로 로직으로 폴백.
+    pat_target_player_bias: float = 0.35
+    # 카운터 돌진(COUNTER_RUSH)은 딜러(E) 전용 저지 기믹 → 플레이어 조준 확률을
+    # 더 높게 잡아 플레이어가 직접 저지해야 하는 상황을 자주 만든다.
+    pat_counter_player_bias: float = 0.6
+
     # ── 기둥(Pillar) 오브젝트 ──
     # 폭주 돌진 유도(그로기) + 전멸기 LOS 은신에 공용. 고정 4개.
     pillar_positions: List[Tuple[float, float]] = field(default_factory=lambda: [
