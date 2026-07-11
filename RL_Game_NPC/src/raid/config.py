@@ -122,6 +122,13 @@ class RaidConfig:
     boss_rotate_speed: float = 3.14159        # 시전 시 최대 회전 (rad). facing 락에 사용
     boss_start_facing: float = 0.0
 
+    # ── 전투: 크리티컬 (로스트아크식 타격감) ──
+    # 파티 유닛이 보스에게 주는 모든 피해(기본공격/Q 혈창/W 혈월 등)에 확률 판정.
+    # 크리 시 데미지에 crit_multiplier 를 곱하고(int 반올림) 피격 이벤트에 crit=True 를 실어 보낸다.
+    # Unity FloatingTextManager 가 crit 플래그로 크게·주황금색·펀치 스케일 연출을 분기.
+    crit_chance: float = 0.25                 # 크리티컬 발생 확률 (0~1)
+    crit_multiplier: float = 1.8              # 크리티컬 데미지 배수
+
     # ── 어그로 ──
     aggro_decay: float = 0.95
     aggro_damage_weight: float = 1.0

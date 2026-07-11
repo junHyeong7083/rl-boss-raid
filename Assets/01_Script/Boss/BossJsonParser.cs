@@ -65,6 +65,7 @@ namespace BossRaid
                     amount = GetInt(d, "amount"),
                     target = GetIntOrDefault(d, "target", -1),
                     skill = GetBool(d, "skill"),
+                    crit = GetBool(d, "crit"),   // 없으면 false (하위 호환)
                     kind = GetString(d, "kind"),
                     // V2 설치기: "skill" 키가 문자열이면 skill_id 로 (bool 이면 GetString 이 null 반환 → 무해)
                     skill_id = GetString(d, "skill"),

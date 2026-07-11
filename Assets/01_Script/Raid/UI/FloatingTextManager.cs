@@ -4,22 +4,46 @@ using UnityEngine.UI;
 namespace BossRaid
 {
     /// <summary>
-    /// 플로팅 데미지/힐 숫자.
-    /// snapshot.events 에서 damage(주황)/damage_taken(빨강)/heal(초록) 이벤트를 읽어
-    /// 대상 유닛 월드 위치 위 1.8m 에서 떠오르며 페이드(1초, 위로 1m).
-    /// 월드→스크린 변환하여 Overlay Canvas 에 표시. 오브젝트 풀 20개.
-    /// RaidHUD 가 Build/OnSnapshot 을 호출한다.
+    /// 플로팅 데미지/힐 숫자 (로스트아크식 타격감).
+    /// snapshot.events 에서 damage(보스 피격)/damage_taken(아군 피격)/heal(힐) 이벤트를 읽어
+    /// 대상 월드 위치 위에서 떠오르며 페이드시킨다. 월드→Overlay Canvas 변환.
+    ///
+    /// 보스 피격(damage):
+    ///  - 일반 : 흰색→연노랑, 폰트 ~24, 위로 40~60px, 0.7s 페이드. 콤마 포맷.
+    ///  - 크리 : 폰트 ~38 Bold, 주황(1,0.6,0.1)→금색, 금색 아웃라인, 등장 펀치 스케일
+    ///           1.6→1.0(0.15s 오버슈트), 미세 회전(-6~6도), 1.0s 유지 후 페이드, "12,345!".
+    ///
+    /// 간단 리스트 풀(24개)로 GC 스파이크를 방지한다. RaidHUD 가 Build/OnSnapshot 을 호출.
     /// </summary>
     public class FloatingTextManager : MonoBehaviour
     {
-        private const int PoolSize = 20;
-        private const float LifeTime = 1.0f;    // 지속(초)
-        private const float RiseWorld = 1.0f;   // 위로 이동(m)
-        private const float SpawnHeight = 1.8f; // 유닛 위 시작 높이(m)
+        private const int PoolSize = 24;
+        private const float SpawnHeight = 1.8f;   // 대상 월드 위 시작 높이(m)
+        private const float SpreadPxMax = 34f;    // 좌우 랜덤 산포(px)
 
-        private static readonly Color ColDamage      = new Color(1.00f, 0.55f, 0.10f, 1f); // 주황(보스 피해)
-        private static readonly Color ColDamageTaken = new Color(0.95f, 0.20f, 0.18f, 1f); // 빨강(아군 피격)
-        private static readonly Color ColHeal        = new Color(0.35f, 0.95f, 0.45f, 1f); // 초록(힐)
+        // ── 일반 히트 ──
+        private const float NormalLife = 0.7f;
+        private const int   NormalFontSize = 24;
+        private const float NormalRisePxMin = 40f;
+        private const float NormalRisePxMax = 60f;
+
+        // ── 크리티컬 ──
+        private const float CritHold = 1.0f;       // 완전 불투명 유지(초)
+        private const float CritFade = 0.35f;      // 이후 페이드(초)
+        private const float CritPunchTime = 0.15f; // 펀치 스케일 지속(초)
+        private const int   CritFontSize = 38;
+        private const float CritRisePx = 26f;
+        private const float CritRotMaxDeg = 6f;    // 미세 회전 범위(±도)
+        private const float CritShakePx = 3f;      // 소멸 시 미세 흔들림(px)
+
+        // ── 팔레트 ──
+        private static readonly Color NormalStart     = new Color(1.00f, 1.00f, 1.00f, 1f); // 흰색
+        private static readonly Color NormalEnd       = new Color(1.00f, 0.97f, 0.68f, 1f); // 연노랑
+        private static readonly Color CritStart        = new Color(1.00f, 0.60f, 0.10f, 1f); // 주황
+        private static readonly Color CritEnd          = new Color(1.00f, 0.84f, 0.35f, 1f); // 금색
+        private static readonly Color CritOutline      = new Color(0.45f, 0.20f, 0.00f, 0.95f); // 진한 금갈색 외곽
+        private static readonly Color ColDamageTaken   = new Color(0.95f, 0.20f, 0.18f, 1f); // 빨강(아군 피격)
+        private static readonly Color ColHeal          = new Color(0.35f, 0.95f, 0.45f, 1f); // 초록(힐)
 
         private RectTransform _canvasRect;
         private BossGameViewer _viewer;
@@ -30,8 +54,15 @@ namespace BossRaid
             public GameObject go;
             public RectTransform rect;
             public Text text;
-            public Vector3 worldStart;   // 시작 월드 위치(유닛 위)
-            public Color baseColor;
+            public Outline outline;      // 크리 전용 금색 외곽 (일반 시 비활성)
+            public Vector3 worldStart;   // 시작 월드 위치(대상 위)
+            public Color colStart;       // 시작 색
+            public Color colEnd;         // 종료 색(그라데이션)
+            public float life;           // 총 수명(초)
+            public float risePx;         // 위로 떠오르는 총 거리(px)
+            public float spreadPx;       // 좌우 산포(px, 부호 포함)
+            public float rotDeg;         // 고정 회전(도, 크리만)
+            public bool crit;            // 크리 연출 여부
             public float elapsed;
             public bool active;
         }
@@ -48,12 +79,19 @@ namespace BossRaid
 
             for (int i = 0; i < PoolSize; i++)
             {
-                var t = RaidUIFactory.NewText($"Float{i}", root, _font, 26, Color.white, TextAnchor.MiddleCenter);
+                var t = RaidUIFactory.NewText($"Float{i}", root, _font, NormalFontSize, Color.white, TextAnchor.MiddleCenter);
                 RaidUIFactory.Place(t.rectTransform,
-                    new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(160f, 40f));
+                    new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(200f, 48f));
                 t.fontStyle = FontStyle.Bold;
+
+                // 크리 전용 금색 외곽 — 기본은 비활성(일반 히트는 외곽 없음).
+                var outline = t.gameObject.AddComponent<Outline>();
+                outline.effectColor = CritOutline;
+                outline.effectDistance = new Vector2(2f, -2f);
+                outline.enabled = false;
+
                 t.gameObject.SetActive(false);
-                _pool[i] = new Floater { go = t.gameObject, rect = t.rectTransform, text = t };
+                _pool[i] = new Floater { go = t.gameObject, rect = t.rectTransform, text = t, outline = outline };
             }
         }
 
@@ -66,21 +104,57 @@ namespace BossRaid
             foreach (var ev in snap.events)
             {
                 if (ev == null || string.IsNullOrEmpty(ev.type)) continue;
-
-                Color col;
-                switch (ev.type)
-                {
-                    case "damage":        col = ColDamage; break;
-                    case "damage_taken":  col = ColDamageTaken; break;
-                    case "heal":          col = ColHeal; break;
-                    default: continue;
-                }
+                if (ev.type != "damage" && ev.type != "damage_taken" && ev.type != "heal") continue;
 
                 if (!TryResolveWorld(ev, snap, out var world)) continue;
 
-                string label = (ev.type == "heal" ? "+" : "") + Mathf.Abs(ev.amount).ToString();
-                Spawn(world + Vector3.up * SpawnHeight, label, col);
+                SpawnFor(ev, world + Vector3.up * SpawnHeight);
             }
+        }
+
+        /// <summary>이벤트 종류·크리 여부에 따라 라벨/색/연출 파라미터를 구성해 스폰.</summary>
+        private void SpawnFor(EventData ev, Vector3 world)
+        {
+            int amount = Mathf.Abs(ev.amount);
+            string num = amount.ToString("N0");   // 콤마 포맷: 12,345
+
+            // 보스 피격 크리티컬 — 크게·주황금색·펀치·회전.
+            if (ev.type == "damage" && ev.crit)
+            {
+                var fc = new Floater
+                {
+                    colStart = CritStart,
+                    colEnd = CritEnd,
+                    life = CritHold + CritFade,
+                    risePx = CritRisePx,
+                    spreadPx = Random.Range(-SpreadPxMax, SpreadPxMax),
+                    rotDeg = Random.Range(-CritRotMaxDeg, CritRotMaxDeg),
+                    crit = true,
+                };
+                Spawn(fc, world, num + "!", CritFontSize);
+                return;
+            }
+
+            // 일반 히트(보스 피격/아군 피격/힐).
+            Color start;
+            switch (ev.type)
+            {
+                case "damage_taken": start = ColDamageTaken; break;
+                case "heal":         start = ColHeal; break;
+                default:             start = NormalStart; break; // damage(비크리)
+            }
+            string label = (ev.type == "heal" ? "+" : "") + num;
+            var f = new Floater
+            {
+                colStart = start,
+                colEnd = (ev.type == "damage") ? NormalEnd : start, // 보스 피격만 흰→연노랑 그라데이션
+                life = NormalLife,
+                risePx = Random.Range(NormalRisePxMin, NormalRisePxMax),
+                spreadPx = Random.Range(-SpreadPxMax, SpreadPxMax),
+                rotDeg = 0f,
+                crit = false,
+            };
+            Spawn(f, world, label, NormalFontSize);
         }
 
         /// <summary>이벤트 대상의 월드 위치 해석. damage=보스, heal=target 아군, 그 외=uid 아군.</summary>
@@ -128,16 +202,30 @@ namespace BossRaid
             return false;
         }
 
-        private void Spawn(Vector3 world, string label, Color color)
+        /// <summary>풀 슬롯을 확보해 스폰 파라미터를 적용.</summary>
+        private void Spawn(Floater cfg, Vector3 world, string label, int fontSize)
         {
             var f = GetFree();
             if (f == null) return;
-            f.active = true;
-            f.elapsed = 0f;
+
             f.worldStart = world;
-            f.baseColor = color;
+            f.colStart = cfg.colStart;
+            f.colEnd = cfg.colEnd;
+            f.life = cfg.life;
+            f.risePx = cfg.risePx;
+            f.spreadPx = cfg.spreadPx;
+            f.rotDeg = cfg.rotDeg;
+            f.crit = cfg.crit;
+            f.elapsed = 0f;
+            f.active = true;
+
             f.text.text = label;
-            f.text.color = color;
+            f.text.fontSize = fontSize;
+            f.text.color = cfg.colStart;
+            f.outline.enabled = cfg.crit;   // 크리만 금색 외곽
+            f.rect.localScale = Vector3.one;
+            f.rect.localRotation = Quaternion.Euler(0f, 0f, cfg.rotDeg);
+
             f.go.SetActive(true);
             UpdateFloaterTransform(f); // 첫 프레임 위치 즉시 반영
         }
@@ -167,9 +255,10 @@ namespace BossRaid
                 if (f == null || !f.active) continue;
 
                 f.elapsed += Time.deltaTime;
-                if (f.elapsed >= LifeTime)
+                if (f.elapsed >= f.life)
                 {
                     f.active = false;
+                    f.outline.enabled = false;
                     f.go.SetActive(false);
                     continue;
                 }
@@ -179,21 +268,56 @@ namespace BossRaid
 
         private void UpdateFloaterTransform(Floater f)
         {
-            float t = Mathf.Clamp01(f.elapsed / LifeTime);
-            Vector3 world = f.worldStart + Vector3.up * (RiseWorld * t);
+            float t = Mathf.Clamp01(f.elapsed / f.life);
+            float ease = 1f - (1f - t) * (1f - t);   // easeOutQuad — 상승 감속
 
-            if (!RaidUIFactory.WorldToCanvas(_canvasRect, Camera.main, world, out var local))
+            if (!RaidUIFactory.WorldToCanvas(_canvasRect, Camera.main, f.worldStart, out var local))
             {
-                // 카메라 뒤 → 숨김 상태로 위치만 유지
+                // 카메라 뒤 → 숨김
                 f.go.SetActive(false);
                 return;
             }
             if (!f.go.activeSelf) f.go.SetActive(true);
-            f.rect.anchoredPosition = local;
 
-            var c = f.baseColor;
-            c.a = 1f - t;   // 선형 페이드아웃
+            float x = f.spreadPx;
+            float y = f.risePx * ease;
+            float alpha;
+            float scale = 1f;
+
+            if (f.crit)
+            {
+                // 등장 펀치: 1.6 → 1.0, 살짝 오버슈트(중간에 1.0 아래로 딥).
+                if (f.elapsed < CritPunchTime)
+                {
+                    float p = Mathf.Clamp01(f.elapsed / CritPunchTime);
+                    float pe = 1f - Mathf.Pow(1f - p, 3f); // easeOutCubic
+                    scale = Mathf.Lerp(1.6f, 1.0f, pe) - Mathf.Sin(p * Mathf.PI) * 0.08f;
+                }
+                // 유지 후 페이드.
+                if (f.elapsed <= CritHold) alpha = 1f;
+                else alpha = 1f - Mathf.Clamp01((f.elapsed - CritHold) / CritFade);
+                // 소멸 구간 미세 흔들림.
+                if (f.elapsed > CritHold)
+                    x += Mathf.Sin(f.elapsed * 42f) * CritShakePx * (1f - alpha);
+            }
+            else
+            {
+                alpha = 1f - t;   // 선형 페이드아웃
+            }
+
+            f.rect.anchoredPosition = local + new Vector2(x, y);
+            f.rect.localScale = Vector3.one * scale;
+
+            // 색 그라데이션(시작→종료) + 알파.
+            var c = Color.Lerp(f.colStart, f.colEnd, ease);
+            c.a = alpha;
             f.text.color = c;
+            if (f.outline.enabled)
+            {
+                var oc = CritOutline;
+                oc.a = CritOutline.a * alpha;
+                f.outline.effectColor = oc;
+            }
         }
     }
 }

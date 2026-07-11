@@ -42,6 +42,7 @@ namespace BossRaid
         public int amount;       // optional
         public int target;       // optional (heal/buff target)
         public bool skill;       // optional (damage의 skill 여부)
+        public bool crit;        // optional (damage/player_skill_cast의 크리티컬 여부 — 로아식 타격감 연출 분기)
         public string kind;      // optional (buff의 "atk"/"shield")
 
         // ── V2 설치기(플레이어 스킬) 필드 — type=="player_skill_cast" 전용 ──

@@ -385,9 +385,13 @@ class RaidEnv:
         dmg = u.attack * (2 if skill else 1)
         if u.buff_atk > 0:
             dmg = int(dmg * 1.3)
+        # 크리티컬 판정 (로스트아크식 타격감) — 데미지 배수 + 이벤트 crit 플래그
+        crit = self.rng.random() < self.config.crit_chance
+        if crit:
+            dmg = int(round(dmg * self.config.crit_multiplier))
         actual = self.boss.take_damage(dmg, u.uid)
         u.total_damage_dealt += actual
-        self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": skill})
+        self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": skill, "crit": crit})
         if self.boss.stagger_active:
             contrib = (self.config.stagger_contrib_skill if skill else self.config.stagger_contrib_basic)
             self.boss.stagger_gauge -= contrib
@@ -419,14 +423,19 @@ class RaidEnv:
 
         hit = math.hypot(tx - self.boss.x, ty - self.boss.y) <= radius + self.config.boss_radius
         actual = 0
+        crit = False
         if hit:
             dmg = damage
             if u.buff_atk > 0:
                 dmg = int(dmg * 1.3)
+            # 크리티컬 판정 (로스트아크식 타격감) — 데미지 배수 + 이벤트 crit 플래그
+            crit = self.rng.random() < self.config.crit_chance
+            if crit:
+                dmg = int(round(dmg * self.config.crit_multiplier))
             actual = self.boss.take_damage(dmg, u.uid)
             u.total_damage_dealt += actual
             if actual > 0:
-                self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": True})
+                self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": True, "crit": crit})
             if self.boss.stagger_active:
                 self.boss.stagger_gauge -= self.config.stagger_contrib_skill
                 self.step_events[u.uid].append({"type": "stagger_contribute",
@@ -434,7 +443,7 @@ class RaidEnv:
         self.step_events[u.uid].append({
             "type": "player_skill_cast", "skill": skill_key,
             "tx": float(tx), "ty": float(ty), "radius": float(radius),
-            "hit": bool(hit), "amount": int(actual),
+            "hit": bool(hit), "amount": int(actual), "crit": bool(crit),
         })
 
     def _do_heal(self, u: PartyUnit):
