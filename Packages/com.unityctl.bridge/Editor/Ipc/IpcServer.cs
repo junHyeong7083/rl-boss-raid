@@ -320,10 +320,12 @@ namespace Unityctl.Plugin.Editor.Ipc
                 var workItem = new WorkItem();
                 _mainThreadQueue.Enqueue(new PendingWork(request, pipe, workItem));
 
+                // NOTE: 이 블로킹 대기가 도메인 리로드를 최대 Delay 길이만큼 지연시킬 수 있어
+                // (Mono가 대기 중 스레드풀 스레드를 abort하지 못함) 10분 → 90초로 단축.
                 var completedTask = Task.WhenAny(
                     workItem.Completion,
                     _shutdownCompletion.Task,
-                    Task.Delay(TimeSpan.FromMinutes(10)))
+                    Task.Delay(TimeSpan.FromSeconds(90)))
                     .GetAwaiter()
                     .GetResult();
 
