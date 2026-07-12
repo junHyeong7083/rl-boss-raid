@@ -15,6 +15,10 @@ from .boss import Boss, ActivePattern
 from .env import RaidEnv, PartyUnit, Pillar
 from .fsm_npc import FSMNpcPolicy
 from .rewards import RewardComputer
+from .bt_layer import BTGimmickLayer
+from .hybrid_policy import (
+    HybridPolicy, build_role_net, load_role_nets, build_hybrid_policies,
+)
 
 __all__ = [
     "RaidConfig", "PartyRole", "PatternID", "PhaseID", "RaidActionID", "BossActionID",
@@ -24,4 +28,6 @@ __all__ = [
     "Boss", "ActivePattern",
     "RaidEnv", "PartyUnit", "Pillar",
     "FSMNpcPolicy", "RewardComputer",
+    "BTGimmickLayer", "HybridPolicy",
+    "build_role_net", "load_role_nets", "build_hybrid_policies",
 ]

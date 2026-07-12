@@ -23,10 +23,24 @@ def _dist(ax, ay, bx, by) -> float:
 
 
 class RewardComputer:
-    def __init__(self, cfg: RaidConfig):
+    """레이드 보상 계산기.
+
+    mode:
+      "full"        — 기존 전체 보상(전투 + 기믹 파훼). env 기본값, 기존 호출 무변경.
+      "combat_only" — 2계층 하이브리드 RL(Layer 2) 전용. 기믹 파훼 보상
+                      (가드/카운터/패링/스태거 파괴/은신/산개/돌진유도)을 제거하고
+                      순수 전투 보상(딜·힐·어그로·버프·생존·위험 페널티·시간)만 남긴다.
+                      기믹은 Layer 1 BT 소관 → RL 학습 공간 축소·수렴 가속(NUM2.md 3.3).
+    """
+
+    def __init__(self, cfg: RaidConfig, mode: str = "full"):
         self.cfg = cfg
+        if mode not in ("full", "combat_only"):
+            raise ValueError(f"unknown reward mode: {mode}")
+        self.mode = mode
 
     def compute(self, env: "RaidEnv") -> Dict[str, float]:
+        gimmicks = (self.mode == "full")
         cfg = self.cfg
         out: Dict[str, float] = {}
         player = env.units[cfg.player_slot]
@@ -95,8 +109,15 @@ class RewardComputer:
                     elif e.get("type") == "death":
                         r += cfg.rw_death
 
-            # ── 항상 적용: 기믹 이벤트 ──
+            # ── 페이즈 클리어(전투 진척) — 두 모드 공통 유지 ──
             for e in events:
+                if e.get("type") == "phase_clear":
+                    r += cfg.rw_phase_clear
+
+            # ── 기믹 이벤트 (full 모드 전용 — combat_only 는 BT 소관이라 제거) ──
+            for e in events:
+                if not gimmicks:
+                    break
                 t = e.get("type")
                 if t == "guard_success":
                     r += cfg.rw_guard_success
@@ -120,8 +141,6 @@ class RewardComputer:
                     r += 20.0
                 elif t == "mechanic_fail":
                     r += -15.0
-                elif t == "phase_clear":
-                    r += cfg.rw_phase_clear
                 elif t == "seal_holding":
                     if e.get("hidden"):
                         r += cfg.rw_seal_hidden
@@ -130,8 +149,8 @@ class RewardComputer:
                 elif t == "seal_fail":
                     r += cfg.rw_seal_fail
 
-            # ── 붉은 낙인 산개 shaping ──
-            if ap is not None and ap.mode == "steps" and ap.pattern_id == PatternID.CRIMSON_BRAND:
+            # ── 붉은 낙인 산개 shaping (full 전용 — 산개는 BT 소관) ──
+            if gimmicks and ap is not None and ap.mode == "steps" and ap.pattern_id == PatternID.CRIMSON_BRAND:
                 step = ap.current_step()
                 if step is not None:
                     mark_uid = step.extra.get("target_uid")
@@ -147,8 +166,8 @@ class RewardComputer:
                         d = _dist(mu.x, mu.y, u.x, u.y)
                         r += min(d / ideal, 1.0) * cfg.rw_brand_spread * (0.3 + urgency)
 
-            # ── 스태거 집결 딜 ──
-            if env.boss.stagger_active and boss_dist <= u.attack_range:
+            # ── 스태거 집결 딜 (full 전용 — 무력화 대응은 BT 소관) ──
+            if gimmicks and env.boss.stagger_active and boss_dist <= u.attack_range:
                 r += 0.5
 
             # 생존/참여

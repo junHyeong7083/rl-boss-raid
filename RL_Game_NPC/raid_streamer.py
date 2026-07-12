@@ -206,29 +206,33 @@ class RLNpcPolicy:
 
 
 def build_policies(mode, env, cfg, ckpt_path, device_str):
-    """NPC 정책 딕셔너리 반환. rl/hybrid 로드 실패 시 FSM 폴백."""
+    """NPC 정책 딕셔너리 반환.
+
+    fsm    : 전원 FSM (비교군).
+    rl     : 역할별 순수 RL(결정론). 로드 실패 시 FSM 폴백. (기존 유지)
+    hybrid : 2계층 BT+RL — Layer 1 BTGimmickLayer 우선, fall-through 시 Layer 2 RL 샘플링.
+             RL 로드 실패 시 BT+FSM 폴백으로도 게임 가능(HybridPolicy 내부 폴백).
+    """
     npc_slots = [i for i, r in enumerate(cfg.party_roles) if r != PartyRole.DEALER]
     if mode == "fsm":
         return {uid: FSMNpcPolicy(env, uid) for uid in npc_slots}, "fsm"
+
+    if mode == "hybrid":
+        # BT+RL (models_raid/final 로드, 실패 시 BT+FSM 폴백). 지금 당장도 플레이 가능.
+        from src.raid import build_hybrid_policies
+        policies, eff = build_hybrid_policies(env, cfg, ckpt_path, device_str)
+        return policies, eff
+
+    # mode == "rl": 역할별 순수 RL (BT 없음).
     try:
-        import torch
-        from src.agent import ActorCritic
-        device = torch.device(device_str)
-        ckpt = torch.load(ckpt_path, map_location=device)
+        from src.raid import load_role_nets
+        role_nets, device = load_role_nets(ckpt_path, cfg, device_str)
         uid_to_role = {i: cfg.party_roles[i] for i in npc_slots}
-        role_nets = {}
-        state_root = ckpt.get("nets") or {"_shared": ckpt.get("net")}
-        for role in set(uid_to_role.values()):
-            n = ActorCritic(obs_size=cfg.obs_size, action_size=cfg.num_actions).to(device)
-            state = None
-            if "nets" in ckpt:
-                state = ckpt["nets"].get(role.name.lower()) or list(ckpt["nets"].values())[0]
-            else:
-                state = ckpt["net"]
-            n.load_state_dict(state); n.eval()
-            role_nets[role] = n
-        rl = {uid: RLNpcPolicy(role_nets[uid_to_role[uid]], env, uid, device) for uid in npc_slots}
-        return rl, mode
+        rl = {uid: RLNpcPolicy(role_nets[uid_to_role[uid]], env, uid, device)
+              for uid in npc_slots if uid_to_role[uid] in role_nets}
+        if len(rl) != len(npc_slots):
+            raise ValueError("일부 역할 네트워크 누락")
+        return rl, "rl"
     except Exception as e:
         log(f"[WARN] RL 정책 로드 실패 ({e}); FSM 폴백")
         return {uid: FSMNpcPolicy(env, uid) for uid in npc_slots}, "fsm(fallback)"

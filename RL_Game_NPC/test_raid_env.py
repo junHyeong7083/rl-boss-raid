@@ -27,6 +27,7 @@ import time
 
 from src.raid import (
     RaidEnv, RaidConfig, FSMNpcPolicy, PartyRole, PatternID, RaidActionID,
+    BTGimmickLayer, HybridPolicy, RewardComputer,
 )
 
 PASS = "[PASS]"
@@ -877,6 +878,138 @@ def test_session_protocol():
             proc.kill()
 
 
+# ─────────────────── BT 계층 (Layer 1) ───────────────────
+
+def test_bt_seal():
+    print("\n== BT) 전멸기 은신 규칙 ==")
+    env = RaidEnv(RaidConfig(), seed=11)
+    env.reset(seed=11)
+    env.boss.start_seal(env._build_ctx())
+    bt = BTGimmickLayer(env, 1)   # 탱커
+    a = bt.act()
+    check(a is not None, "SEAL 활성 시 BT fire (int 반환)")
+    check(bt.last_decision["rule"] == "seal_hide", "규칙명 seal_hide")
+
+
+def test_bt_imminent_escape():
+    print("\n== BT) 임박 위험 회피 규칙 ==")
+    env = RaidEnv(RaidConfig(), seed=12)
+    env.reset(seed=12)
+    b = env.boss
+    b.start_step_pattern(PatternID.EARTH_CRUSH, env._build_ctx())
+    ap = b.active_pattern
+    ap.turns_remaining = 1                      # 임박(≤2턴)
+    healer = env.units[2]
+    healer.x, healer.y = b.x + 2.5, b.y         # 중심 원(r=3) 안, 가장자리 근처
+    bt = BTGimmickLayer(env, 2)
+    a = bt.act()
+    check(a is not None and int(a) in range(env.config.num_actions),
+          "임박 텔레그래프 안 → BT 탈출 액션")
+    check(bt.last_decision["rule"] == "imminent_escape", "규칙명 imminent_escape")
+    # 여유(잔여 5턴)면 fire 안 함 → RL 위임(None)
+    ap.turns_remaining = 5
+    bt2 = BTGimmickLayer(env, 2)
+    check(bt2.act() is None, "잔여 5턴(여유)이면 BT pass(None) → RL 위임")
+
+
+def test_bt_brand():
+    print("\n== BT) 붉은 낙인 산개 규칙 ==")
+    env = RaidEnv(RaidConfig(), seed=13)
+    env.reset(seed=13)
+    b = env.boss
+    b.start_step_pattern(PatternID.CRIMSON_BRAND, env._build_ctx())
+    ap = b.active_pattern
+    marked = ap.target_uids[0] if ap.target_uids else 1
+    if marked == env.config.player_slot:       # 딜러면 NPC 로 강제 교체(BT 는 NPC 대상)
+        marked = 1
+        ap.target_uids = [1]
+        ap.steps[ap.step_index].extra["target_uid"] = 1
+    bt = BTGimmickLayer(env, marked)
+    a = bt.act()
+    check(a is not None, "낙인 대상 NPC → BT fire (산개)")
+    check(bt.last_decision["rule"] == "brand_spread", "규칙명 brand_spread")
+
+
+def test_bt_stagger():
+    print("\n== BT) 무력화 그로기 집중 규칙 ==")
+    env = RaidEnv(RaidConfig(), seed=14)
+    env.reset(seed=14)
+    env.boss.stagger_active = True
+    env.units[1].cooldowns[int(RaidActionID.TAUNT)] = 0
+    bt_tank = BTGimmickLayer(env, 1)
+    a = bt_tank.act()
+    check(int(a) == int(RaidActionID.TAUNT), "스태거 창 탱커 → TAUNT")
+    check(bt_tank.last_decision["rule"] == "stagger_taunt", "규칙명 stagger_taunt")
+    bt_heal = BTGimmickLayer(env, 2)
+    a2 = bt_heal.act()
+    check(a2 is not None and bt_heal.last_decision["rule"] == "stagger_dps",
+          "스태거 창 힐러 → 근접/딜(stagger_dps)")
+
+
+def test_bt_fallthrough():
+    print("\n== BT) 기믹 없음 → fall-through ==")
+    env = RaidEnv(RaidConfig(), seed=15)
+    env.reset(seed=15)
+    env.boss.active_pattern = None
+    env.boss.stagger_active = False
+    bt = BTGimmickLayer(env, 1)
+    check(bt.act() is None, "기믹 없음 → None(RL 위임)")
+    check(bt.last_decision["rule"] is None, "규칙명 None")
+
+
+# ─────────────────── 하이브리드 폴백 ───────────────────
+
+def test_hybrid_fallback():
+    print("\n== Hybrid) RL 미로드 폴백(BT+FSM) ==")
+    env = RaidEnv(RaidConfig(), seed=16)
+    env.reset(seed=16)
+    bt = BTGimmickLayer(env, 1)
+    pol = HybridPolicy(bt, rl_net=None, role=PartyRole.TANK, device=None,
+                       temperature=1.0, obs_delay_turns=1, action_stickiness=0.6)
+    # 기믹 없음 → RL 없음 → FSM 폴백 액션
+    a = pol.act()
+    check(isinstance(a, int) and 0 <= a < env.config.num_actions,
+          "RL 미로드 시 FSM 폴백으로 유효 액션 반환")
+    check(pol.last_source in ("fsm_fallback", "bt"), "last_source 기록")
+    # SEAL 활성 → BT 가 가져감
+    env.boss.start_seal(env._build_ctx())
+    a2 = pol.act()
+    check(isinstance(a2, int), "SEAL 시에도 유효 액션")
+    check(pol.last_source == "bt", "SEAL 턴 last_source=bt")
+
+
+# ─────────────────── combat_only 보상 회귀 ───────────────────
+
+def test_reward_combat_only():
+    print("\n== Reward) combat_only 모드 회귀 ==")
+    env = RaidEnv(RaidConfig(), seed=17)
+    env.reset(seed=17)
+    env.boss.active_pattern = None
+    full = RewardComputer(env.config, mode="full")
+    combat = RewardComputer(env.config, mode="combat_only")
+
+    # (1) 기믹 이벤트(카운터 성공)는 combat_only 에서 제거
+    env.step_events = {uid: [{"type": "counter_success"}] for uid in env.units}
+    rf = full.compute(env)
+    rc = combat.compute(env)
+    diffs = [round(rf[f"p{uid}"] - rc[f"p{uid}"], 3)
+             for uid in env.units if env.units[uid].alive]
+    check(all(abs(d - env.config.rw_counter_success) < 1e-3 for d in diffs),
+          "counter_success 보상이 full 에만 반영(combat_only 제거)")
+
+    # (2) 페이즈 클리어(전투 진척)는 두 모드 공통 유지
+    env.step_events = {uid: [{"type": "phase_clear"}] for uid in env.units}
+    rf2 = full.compute(env)
+    rc2 = combat.compute(env)
+    same = [abs(rf2[f"p{uid}"] - rc2[f"p{uid}"]) < 1e-6
+            for uid in env.units if env.units[uid].alive]
+    check(all(same), "phase_clear 는 combat_only 에서도 유지(전투 진척)")
+
+    # (3) 기본 호출(mode 미지정)은 full 과 동일(기존 호출 무변경)
+    default = RewardComputer(env.config)
+    check(default.mode == "full", "mode 미지정 기본값 full")
+
+
 # ─────────────────── main ───────────────────
 
 def main():
@@ -914,6 +1047,16 @@ def main():
     test_snapshot_schema()
     test_protocol_aim_parse()
     test_protocol_pos_parse()
+
+    # 2계층 하이브리드(BT+RL) 신규 검증
+    test_bt_seal()
+    test_bt_imminent_escape()
+    test_bt_brand()
+    test_bt_stagger()
+    test_bt_fallthrough()
+    test_hybrid_fallback()
+    test_reward_combat_only()
+
     test_session_protocol()
 
     print("\n" + "=" * 60)

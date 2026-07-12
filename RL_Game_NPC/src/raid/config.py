@@ -403,6 +403,41 @@ class RaidConfig:
     engage_distance: float = 5.0
     disengage_distance: float = 9.0
 
+    # ── 2계층 하이브리드(BT+RL) — Layer 2 인퍼런스 인간성 장치 (hybrid_policy.py) ──
+    # (a) 관측 지연: RL 은 obs_delay_turns 턴 전 관측으로 결정(반응 지연 모사, 사람같음).
+    # (b) action stickiness: 직전 이동 방향과 같은 이동 액션 로그잇 보너스(지터 억제).
+    # temperature: RL 샘플링 온도(>0, argmax 금지 — 결정론 붕괴/기계적 반응 방지).
+    hybrid_temperature: float = 1.0
+    hybrid_obs_delay_turns: int = 1
+    hybrid_action_stickiness: float = 0.6
+
+    # ── 커리큘럼 학습 (train_raid.py) ──
+    # 보스 HP 를 단계적으로 상향(각 단계 승률 도달 시 다음 단계, 이전 체크포인트 이어서).
+    # 쉬운 보스에서 "이기는 경험"을 먼저 확보 → reward 분포 유의미화(NUM2.md 발견 2).
+    curriculum_boss_hp: Tuple[int, int, int] = (12000, 28000, 55000)
+    curriculum_advance_winrate: float = 0.40
+
+    # ── 플레이어 모델 도메인 랜덤화 (train_raid.py PlayerModelWrapper) ──
+    # 학습 딜러는 FSM 스크립트지만 실플레이는 사람 → NPC 가 특정 스크립트에 과적합되지
+    # 않도록 에피소드마다 플레이어 성향을 랜덤 샘플링해 회피/공격/오행동 분포를 흔든다.
+    #   evade_turns: 텔레그래프 잔여 ≤ 이 값일 때만 회피(safe=일찍, aggressive/novice=늦게)
+    #   idle_prob   : 아무것도 안 하는 턴 확률
+    #   jitter_prob : 이동 방향을 인접 8방향으로 흔들 확률
+    #   skill_defer_prob: 스킬 사용을 미루고 평타/대기로 다운그레이드할 확률
+    #   random_move_prob: 오행동(무작위 이동) 확률 (novice 높음)
+    player_model_randomize: bool = True
+    player_model_weights: Dict[str, float] = field(default_factory=lambda: {
+        "aggressive": 0.34, "safe": 0.33, "novice": 0.33,
+    })
+    player_model_params: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
+        "aggressive": {"evade_turns": 1, "idle_prob": 0.02, "jitter_prob": 0.05,
+                       "skill_defer_prob": 0.05, "random_move_prob": 0.02},
+        "safe":       {"evade_turns": 4, "idle_prob": 0.08, "jitter_prob": 0.05,
+                       "skill_defer_prob": 0.25, "random_move_prob": 0.02},
+        "novice":     {"evade_turns": 1, "idle_prob": 0.12, "jitter_prob": 0.20,
+                       "skill_defer_prob": 0.20, "random_move_prob": 0.25},
+    })
+
 
 # 스냅샷/스킬바 UI 용: 액션 ID ↔ 의미있는 스킬 키 이름
 # (Unity 스킬바가 이 키로 쿨다운 게이지를 표시. RAID_V2_DESIGN.md 매핑 표 참고)
