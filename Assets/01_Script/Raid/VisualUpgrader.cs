@@ -47,7 +47,10 @@ namespace BossRaid
 
         [Header("Toggles")]
         [Tooltip("혈월 마법진 바닥 적용")] public bool enableFloor = true;
-        [Tooltip("캐릭터 림라이트 적용")]   public bool enableRim = true;
+        [Tooltip("캐릭터 림라이트 적용 — 기본 OFF. 미검증 셰이더로 캐릭터 전체 머티리얼을 교체하다 " +
+                 "컴파일 실패 시 캐릭터가 전부 사라지는 사고가 있었음(2026-07-13). " +
+                 "에디터에서 RimLit.shader 정상 컴파일 확인 후 켤 것.")]
+        public bool enableRim = false;
 
         [Header("Tuning")]
         [Tooltip("신규 유닛/보스 감지 폴링 간격(초)")]
