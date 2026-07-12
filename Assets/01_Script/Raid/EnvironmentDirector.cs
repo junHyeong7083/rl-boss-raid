@@ -102,7 +102,9 @@ namespace BossRaid
         private const float ArenaCenterSimY = 10f;
         private const float DarkOuterWorld = 18f;     // 어둠 오버레이 바깥 반경(바닥 반경 16 + 여유)
         private const int EdgeMarkerCount = 16;       // 경계 러블 개수(절제)
-        private static readonly Color OutOfBoundsDark = new Color(0.015f, 0.0f, 0.02f, 0.62f); // 경계 밖 어둠
+        // 탑/공허 콘셉트: 평면 어둠 도넛의 존재감을 낮춰(0.62→0.35) 낙사 가장자리 가독을 살린다.
+        // 색도 순수 검정 대신 공허 톤(암청자주)으로.
+        private static readonly Color OutOfBoundsDark = new Color(0.02f, 0.01f, 0.04f, 0.35f); // 경계 밖 공허(옅게)
         private static readonly Color OutOfBoundsRim  = new Color(0.55f, 0.06f, 0.06f, 1f);    // 경계 안쪽 핏빛 림
         private GameObject _boundaryDark;             // 경계 밖 어둠 도넛 오버레이
         private Material _boundaryDarkMat;
@@ -553,9 +555,12 @@ namespace BossRaid
                 var mr = go.AddComponent<MeshRenderer>();
                 mf.sharedMesh = mesh;
                 if (mat != null) mr.sharedMaterial = mat;
-                // 낮은 러블 느낌(배경 기둥과 구분): 작고 납작하게, 인덱스별 소폭 변주.
-                float s = 0.5f + (i % 3) * 0.12f;
-                go.transform.localScale = new Vector3(s, 0.4f + (i % 2) * 0.15f, s);
+                // "부서진 난간" 느낌: 얇은 난간 기둥(발루스터)과 짧은 파편 그루터기를 섞어 스케일 다양화.
+                bool standing = (i % 4) != 0;                       // 3/4 는 세운 기둥, 1/4 은 부서진 그루터기
+                float thick = 0.28f + (i % 3) * 0.07f;              // 얇게
+                float height = standing ? (1.1f + (i % 3) * 0.5f)   // 세운 난간 기둥
+                                        : (0.35f + (i % 2) * 0.15f); // 부서진 짧은 파편
+                go.transform.localScale = new Vector3(thick, height, thick);
                 mr.shadowCastingMode = ShadowCastingMode.Off;
                 _edgeMarkers.Add(go.transform);
             }
