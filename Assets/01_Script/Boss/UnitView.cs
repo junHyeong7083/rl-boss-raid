@@ -52,6 +52,9 @@ namespace BossRaid
         private UnitData _latest;
         private bool _hasData;
         private bool _prevAlive;              // 직전 생존 상태(사망/부활 전환 감지용)
+        private Vector3 _lastShownPos;        // 직전 프레임 최종 표시 위치(예측 포함) — IsMoving 판정용
+        private bool _shownPosInit;
+        private bool _isMovingAnim;           // 히스테리시스 적용된 달리기 애니 상태
         private bool _aliveKnown;             // 생존 상태를 한 번이라도 받았는지
         private Vector3 _authPos;             // 예측 오염 없는 권위 보간 위치(transform.position 과 분리)
 
@@ -265,12 +268,10 @@ namespace BossRaid
             _authPos = newPos;
             transform.position = newPos;
 
-            if (animator != null)
-            {
-                bool moving = _lerp.IsMoving(t);
-                SafeSetBool(paramIsMoving, moving);
-                // Dead bool 은 ApplySnapshot 의 생존 전환 처리에서만 세팅(중복/충돌 제거).
-            }
+            // IsMoving 은 여기(서버 보간 기준)가 아니라 LateUpdate 에서 "실제 화면 이동 속도"
+            // (예측 오프셋 포함)로 판정한다 — 예측으로 몸이 움직이는데 발이 안 움직이는
+            // 미끄러짐(순간이동처럼 보이는 체감)의 원인이 서버 기준 판정이었다.
+            // Dead bool 은 ApplySnapshot 의 생존 전환 처리에서만 세팅(중복/충돌 제거).
 
             // 회전: 딜러 예측기가 소유권을 가져간 동안(ExternalRotationOwner)은 스킵 —
             // 예측기의 intent 회전과 이중 슬럽 경합(떨림/역회전)을 없앤다. NPC/비소유 시 기존 로직.
@@ -303,6 +304,23 @@ namespace BossRaid
 
         private void LateUpdate()
         {
+            // IsMoving 판정: "실제 화면 이동 속도" 기준 (예측 오프셋 포함).
+            // 예측기 LateUpdate(-50)가 먼저 실행되어 transform.position 이 최종 표시 위치인 시점.
+            // 서버 보간 기준(_lerp.IsMoving) 판정은 예측 이동 중 발이 멈추는 미끄러짐을 만들었다.
+            if (animator != null && _hasData)
+            {
+                float dt = Mathf.Max(1e-5f, Time.unscaledDeltaTime);
+                Vector3 shown = transform.position;
+                if (!_shownPosInit) { _lastShownPos = shown; _shownPosInit = true; }
+                Vector3 dv = shown - _lastShownPos; dv.y = 0f;
+                float speed = dv.magnitude / dt;
+                _lastShownPos = shown;
+                // 히스테리시스: 켤 때 0.6, 끌 때 0.25 (경계에서 달리기/정지 깜빡임 방지)
+                if (_isMovingAnim) { if (speed < 0.25f) _isMovingAnim = false; }
+                else               { if (speed > 0.6f)  _isMovingAnim = true; }
+                SafeSetBool(paramIsMoving, _isMovingAnim && _latest != null && _latest.alive);
+            }
+
             // 사망 침강: Update 가 transform.position(y=base)를 덮으므로 이후 LateUpdate 에서 오프셋 적용.
             if (_deathSinkY > 0f) transform.position -= Vector3.up * _deathSinkY;
 
