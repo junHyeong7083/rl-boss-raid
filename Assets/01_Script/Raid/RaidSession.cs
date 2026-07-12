@@ -246,6 +246,17 @@ namespace BossRaid
                 + ",\"ty\":" + ty.ToString("F2", ci) + "}");
         }
 
+        /// <summary>
+        /// 클라이언트 권위 위치 보고: {"px":..,"py":..}\n — px/py 는 sim 좌표. 액션 메시지와 별도
+        /// 라인(20Hz 스로틀 권장). Python 은 최신값만 채택해 딜러 위치로 삼는다(사람 조종 중일 때).
+        /// </summary>
+        public void SendPos(float px, float py)
+        {
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            SendRaw("{\"px\":" + px.ToString("F2", ci)
+                + ",\"py\":" + py.ToString("F2", ci) + "}");
+        }
+
         /// <summary>세션 제어 전송: {"cmd":"start"} / {"cmd":"quit"} 등</summary>
         public void SendCmd(string cmd)
         {

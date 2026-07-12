@@ -7,13 +7,16 @@ namespace BossRaid
     /// <summary>
     /// 파티 유닛(플레이어 포함) 시각화. 격자 Lerp + HP 바 + 상태 효과.
     ///
-    /// 권위/표시 위치 분리:
-    ///   클라이언트 사이드 예측(DealerMotionPredictor)이 LateUpdate 에서 transform.position 에
-    ///   예측 오프셋을 더해 덮어쓰므로, transform.position 은 다음 프레임에 "예측 오염" 상태다.
-    ///   이를 보간 시작점/회전 방향 계산에 다시 쓰면 시작점이 오프셋만큼 오염되고 회전 타깃이
-    ///   후향으로 뒤집혀 떨림이 생긴다. → 예측 오염 없는 권위 보간 위치를 _authPos 필드로 분리.
-    ///   _lerp 갱신과 회전 방향은 _authPos 기준으로만 계산하고, transform.position 은 렌더 결과로만 쓴다.
-    ///   예측기는 AuthoritativePosition 프로퍼티로 오염 없는 권위 위치를 읽는다.
+    /// 위치 소유권:
+    ///   NPC(탱커/힐러/서포터)는 서버 스냅샷을 적응형 보간(_lerp)해 위치를 렌더한다.
+    ///   딜러(role 0, 플레이어)는 클라이언트 권위 이동 개편으로 위치·회전을 RaidPlayerController 가
+    ///   직접 소유한다(PositionOwnedExternally=true). 이 경우 UnitView 는 서버 보간을 위치에 적용하지
+    ///   않고(컨트롤러가 transform 을 매 프레임 씀), 에피소드 리셋(부활/재배치, 큰 점프)일 때만 서버
+    ///   위치로 1회 스냅하며 OnResetWarp 로 컨트롤러와 동기화한다.
+    ///
+    /// 권위/표시 위치 분리(NPC 경로):
+    ///   _lerp 갱신과 회전 방향은 예측 오염 없는 권위 보간 위치(_authPos)를 기준으로만 계산하고,
+    ///   transform.position 은 렌더 결과로만 쓴다. (AuthoritativePosition 프로퍼티는 레거시 계약으로 유지.)
     /// </summary>
     public class UnitView : MonoBehaviour
     {
@@ -65,11 +68,24 @@ namespace BossRaid
         public Vector3 AuthoritativePosition => _hasData ? _authPos : transform.position;
 
         /// <summary>
-        /// 이동 회전 소유권 위임 플래그. 딜러의 DealerMotionPredictor 가 intent 활성 동안 true 로 세팅한다.
+        /// 이동 회전 소유권 위임 플래그. 딜러의 RaidPlayerController 가 스폰 시 true 로 세팅한다.
         /// true 인 동안 UnitView.Update 의 회전 로직(이동 방향/보스 바라보기 Slerp)을 스킵해
-        /// 예측기의 intent 회전과 이중 슬럽 경합(떨림/역회전)을 없앤다. NPC 유닛은 항상 false(기존 동작).
+        /// 컨트롤러의 회전과 이중 슬럽 경합(떨림/역회전)을 없앤다. NPC 유닛은 항상 false(기존 동작).
+        /// (딜러는 PositionOwnedExternally=true 로 Update 가 조기 반환하므로 이 플래그는 안전 표식 역할.)
         /// </summary>
         public bool ExternalRotationOwner { get; set; }
+
+        /// <summary>
+        /// 위치 소유권 외부 위임 플래그(클라이언트 권위 이동). 딜러(role 0)의 RaidPlayerController 가
+        /// 스폰 시 true 로 세팅한다. true 인 동안 UnitView 는 서버 스냅샷을 위치 보간에 적용하지 않고
+        /// (컨트롤러가 transform.position 을 직접 소유), 에피소드 리셋(부활/재배치, 큰 점프)일 때만
+        /// 서버 위치로 1회 스냅하며 OnResetWarp 로 컨트롤러에 동기화를 알린다. NPC 는 항상 false.
+        /// </summary>
+        public bool PositionOwnedExternally { get; set; }
+
+        /// <summary>에피소드 리셋(부활/재배치) 시 서버 위치(월드)로 스냅됨을 컨트롤러에 알리는 콜백.
+        /// RaidPlayerController.WarpTo 가 여기 연결된다.</summary>
+        public System.Action<Vector3> OnResetWarp;
 
         // ─────────────── 피격 플래시 / 사망 디졸브 (MPB, 머티리얼 신규 인스턴스 생성 금지) ───────────────
         [Header("Juice (피격/사망 연출)")]
@@ -164,13 +180,31 @@ namespace BossRaid
             // 유클리드 float 좌표를 월드 좌표로 직접 변환 (중심 오프셋 불필요)
             var world = viewer.ContinuousToWorld(u.x, u.y);
 
-            // 적응형 보간 갱신: 권위 위치(보간 중이면 그 위치)에서 새 목표로 이어붙임.
-            // 예측 오염된 transform.position 대신 _authPos 를 시작점으로 써 오프셋 오염을 차단한다.
-            // 첫 데이터 수신 전(!_hasData)에는 _authPos 가 아직 유효하지 않으므로 transform.position 폴백.
-            Vector3 current = _hasData ? _authPos : transform.position;
-            bool snapped = _lerp.OnSnapshot(current, world, snapDistance);
-            if (snapped) { transform.position = world; _authPos = world; }
-            _hasData = true;
+            if (PositionOwnedExternally)
+            {
+                // 클라이언트 권위(딜러): 위치는 컨트롤러가 소유 — 서버 보간을 위치에 적용하지 않는다.
+                // 첫 데이터/에피소드 리셋(부활·재배치로 서버 위치가 크게 점프) 시에만 서버 위치로 1회
+                // 스냅하고 OnResetWarp 로 컨트롤러와 동기화한다. 그 외에는 transform 을 건드리지 않는다.
+                Vector3 cur = _hasData ? transform.position : world;
+                bool reset = !_hasData || (world - cur).sqrMagnitude >= snapDistance * snapDistance;
+                if (reset)
+                {
+                    transform.position = world;
+                    _authPos = world;
+                    OnResetWarp?.Invoke(world);
+                }
+                _hasData = true;
+            }
+            else
+            {
+                // 적응형 보간 갱신: 권위 위치(보간 중이면 그 위치)에서 새 목표로 이어붙임.
+                // 예측 오염된 transform.position 대신 _authPos 를 시작점으로 써 오프셋 오염을 차단한다.
+                // 첫 데이터 수신 전(!_hasData)에는 _authPos 가 아직 유효하지 않으므로 transform.position 폴백.
+                Vector3 current = _hasData ? _authPos : transform.position;
+                bool snapped = _lerp.OnSnapshot(current, world, snapDistance);
+                if (snapped) { transform.position = world; _authPos = world; }
+                _hasData = true;
+            }
 
             // HP 바
             if (hpBarFill != null)
@@ -278,6 +312,10 @@ namespace BossRaid
         private void Update()
         {
             if (!_hasData) return;
+
+            // 클라이언트 권위(딜러): 위치·회전 모두 컨트롤러가 소유 — 서버 보간/회전 로직 스킵.
+            // (IsMoving 애니는 LateUpdate 에서 실제 화면 이동 속도로 판정하므로 그대로 동작한다.)
+            if (PositionOwnedExternally) return;
 
             // 적응형 선형 보간 (smoothstep 제거 → 연속 이동 시 맥동 없이 등속)
             Vector3 newPos = _lerp.Evaluate(out float t);

@@ -1,8 +1,18 @@
+using System;
 using UnityEngine;
 
 namespace BossRaid
 {
     /// <summary>
+    /// [은퇴] 클라이언트 권위 이동 개편으로 은퇴한 컴포넌트.
+    ///
+    /// 배경: 0.3초 턴 서버 이동 + 클라 예측/보정 구조가 조작감 어색함의 근원이었다. 싱글플레이라
+    ///   치팅 무관하므로 딜러 위치를 클라이언트가 소유하도록 전환했다(RaidPlayerController 가 딜러
+    ///   Transform 을 직접 이동시키고 20Hz 로 위치 보고). 이 예측기는 더 이상 부착되지 않으며
+    ///   (EnsurePredictor 제거), 참조 컴파일 안전을 위해 파일과 API 는 남겨두되 [Obsolete] 로 표시한다.
+    ///   새 코드는 RaidPlayerController 의 무버/충돌 클램프(ClampToWorld)를 사용할 것.
+    ///
+    /// ── 이하 원본 설명(레거시) ──
     /// 딜러 클라이언트 사이드 예측(표준 넷코드 방식).
     /// 클릭 즉시 로컬에서 이동을 시작하고, 매 스냅샷 서버 권위 위치로 부드럽게 보정한다.
     ///
@@ -28,6 +38,7 @@ namespace BossRaid
     ///
     /// 부착: RaidPlayerController 가 딜러 UnitView GameObject 를 찾은 시점에 AddComponent.
     /// </summary>
+    [Obsolete("클라이언트 권위 이동 개편으로 은퇴 — 딜러 이동은 RaidPlayerController 가 직접 소유한다. 부착하지 말 것.")]
     [DefaultExecutionOrder(-50)]
     public class DealerMotionPredictor : MonoBehaviour
     {

@@ -60,6 +60,7 @@ class SessionLink:
         self._lock = threading.Lock()
         self._latest_action = int(RaidActionID.STAY)
         self._latest_aim = None          # (tx, ty) sim 좌표 or None
+        self._latest_player_pos = None   # (px, py) sim 좌표 — 클라 권위 위치 보고(최신값만 유효)
         self._action_count = 0
         self._cmd_q: Queue = Queue()
         self._stop = False
@@ -89,6 +90,16 @@ class SessionLink:
             self._latest_action = int(RaidActionID.STAY)
             self._latest_aim = None
             return a, aim
+
+    def get_player_pos(self):
+        """클라가 보고한 최신 딜러 위치 (px, py) or None. 소비하지 않음(최신값 유지)."""
+        with self._lock:
+            return self._latest_player_pos
+
+    def reset_player_pos(self):
+        """에피소드 경계에서 직전 에피소드의 스테일 보고 폐기."""
+        with self._lock:
+            self._latest_player_pos = None
 
     def peek_action_count(self) -> int:
         with self._lock:
@@ -143,6 +154,14 @@ class SessionLink:
             return
         if "cmd" in msg:
             self._cmd_q.put(str(msg["cmd"]))
+        elif "px" in msg and "py" in msg:
+            # 클라 권위 위치 보고(액션 메시지와 별도 라인, 20Hz). 최신값만 유효.
+            try:
+                pos = (float(msg["px"]), float(msg["py"]))
+            except (TypeError, ValueError):
+                return
+            with self._lock:
+                self._latest_player_pos = pos
         elif "action" in msg:
             aim = None
             if "tx" in msg and "ty" in msg:
@@ -235,18 +254,26 @@ def run_episode(env, link, broadcaster, npc_policies, no_player, turn_interval, 
     """한 에피소드 진행. 기믹 카운트 딕셔너리 반환."""
     gimmick = {}
     start_actions = link.peek_action_count()
+    # 에피소드 경계: 직전 에피소드의 스테일 위치 보고 폐기(리셋 직후 첫 턴은 서버 위치 유지).
+    link.reset_player_pos()
+    human_dealer = not no_player and dealer_fsm is None
     t0 = time.time()
     while not env.done:
         aim = None
+        player_pos = None
         if no_player or dealer_fsm is not None:
             pa = dealer_fsm.act() if dealer_fsm else int(RaidActionID.STAY)
-            # FSM 딜러는 aim 미지정 → env 가 보스 위치 자동 조준
+            # FSM 딜러는 aim 미지정 → env 가 보스 위치 자동 조준. 위치도 서버 이동(클라 권위 아님).
         else:
             pa, aim = link.get_action()
+            # 사람 조종: 딜러 위치는 클라가 소유 — 최신 보고 위치를 env 에 전달(클라이언트 권위).
+            player_pos = link.get_player_pos()
         actions = {"p0": pa}
         for uid, pol in npc_policies.items():
             actions[f"p{uid}"] = pol.act()
-        env.step(actions, aim_points={"p0": aim} if aim is not None else None)
+        env.step(actions,
+                 aim_points={"p0": aim} if aim is not None else None,
+                 player_pos=player_pos if human_dealer else None)
         broadcaster.send(env.get_snapshot())
         for evs in env.step_events.values():
             for e in evs:

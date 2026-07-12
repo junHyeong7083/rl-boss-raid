@@ -709,6 +709,90 @@ def test_snapshot_schema():
     check(donut_seen, "donut kind 스냅샷 출력")
 
 
+def test_player_pos_stream():
+    print("\n== 10b) 플레이어 위치 스트림 채택(클라이언트 권위) ==")
+    cfg = RaidConfig()
+    duid = cfg.player_slot
+    max_d = cfg.player_speed_cap * cfg.turn_seconds
+    # (a) 상한 이내 보고 → 그대로 채택
+    env = _fresh_env_for_aim(501)
+    d = env.units[duid]
+    d.x, d.y = 10.0, 13.0
+    env.step(_stay(), player_pos=(10.0, 13.0 + max_d * 0.5))   # 상한 절반 이동
+    check(abs(d.x - 10.0) < 1e-6 and abs(d.y - (13.0 + max_d * 0.5)) < 1e-6,
+          f"상한 이내 보고 채택 ({d.x:.2f},{d.y:.2f})")
+    # (b) 과속 보고 → 상한 거리로 클램프
+    env = _fresh_env_for_aim(502)
+    d = env.units[duid]
+    d.x, d.y = 10.0, 10.0
+    env.step(_stay(), player_pos=(10.0, 10.0 + 5.0))   # 5.0 >> max_d
+    moved = math.hypot(d.x - 10.0, d.y - 10.0)
+    check(abs(moved - max_d) < 1e-6, f"과속 보고 상한 클램프 (moved={moved:.2f} == {max_d:.2f})")
+    # (c) 경계 밖 보고 → 아레나 안으로 클램프
+    env = _fresh_env_for_aim(503)
+    d = env.units[duid]
+    cx, cy = cfg.arena_center
+    d.x, d.y = cx, cy + env.arena_radius - 0.2     # 경계 근처
+    env.step(_stay(), player_pos=(cx, cy + env.arena_radius + 5.0))   # 한참 밖
+    dist_c = math.hypot(d.x - cx, d.y - cy)
+    check(dist_c <= env.arena_radius - d.radius + 1e-6, f"경계 밖 보고 아레나 클램프 (r={dist_c:.2f})")
+    # (d) 사람 조종 중 MOVE 액션은 위치에 영향 없음(스트림이 소유) — 보스에서 떨어진 곳
+    env = _fresh_env_for_aim(504)
+    env.boss.x, env.boss.y = 15.0, 15.0
+    d = env.units[duid]
+    d.x, d.y = 8.0, 8.0
+    actions = _stay(); actions[f"p{duid}"] = int(RaidActionID.MOVE_UP)
+    env.step(actions, player_pos=(8.5, 8.0))
+    check(abs(d.x - 8.5) < 1e-6 and abs(d.y - 8.0) < 1e-6,
+          f"MOVE 액션 무시·스트림 위치 채택 ({d.x:.2f},{d.y:.2f})")
+    # (e) 보고 없으면 위치 유지 + facing 델타 갱신 — 보스에서 떨어진 곳
+    env = _fresh_env_for_aim(505)
+    env.boss.x, env.boss.y = 15.0, 15.0
+    d = env.units[duid]
+    d.x, d.y = 8.0, 8.0
+    env.step(_stay(), player_pos=None)   # 보고 없음 → MOVE 도 없으니 제자리
+    check(abs(d.x - 8.0) < 1e-6 and abs(d.y - 8.0) < 1e-6, "보고 없으면 위치 유지")
+    env.step(_stay(), player_pos=(9.0, 8.0))
+    check(abs(d.facing - 0.0) < 1e-6, "채택 시 이동 델타로 facing 갱신(+x → 0)")
+    # (f) 사람 조종 중 DASH: 위치 이동 없음 + dash 이벤트/쿨다운 유지 — 보스에서 떨어진 곳
+    env = _fresh_env_for_aim(506)
+    env.boss.x, env.boss.y = 15.0, 15.0
+    d = env.units[duid]
+    d.x, d.y = 8.0, 8.0
+    actions = _stay(); actions[f"p{duid}"] = int(RaidActionID.DASH)
+    env.step(actions, player_pos=(8.3, 8.0))
+    dash_ev = next((e for e in env.step_events.get(duid, []) if e.get("type") == "dash"), None)
+    check(dash_ev is not None, "사람 조종 DASH dash 이벤트 방출")
+    check(d.cooldowns.get(int(RaidActionID.DASH), 0) > 0, "사람 조종 DASH 쿨다운 유지")
+    check(abs(d.x - 8.3) < 1e-6, "DASH 이동 효과 무시(위치=스트림 채택값)")
+    # (g) 보스 몸통 안 보고 → 몸통 밖으로 밀림
+    env = _fresh_env_for_aim(507)
+    d = env.units[duid]
+    env.boss.x, env.boss.y = 10.0, 10.0
+    d.x, d.y = 10.0 + cfg.boss_radius + d.radius, 10.0   # 보스 표면 근처
+    env.step(_stay(), player_pos=(10.0, 10.0))   # 보스 중심으로 보고
+    surf = math.hypot(d.x - 10.0, d.y - 10.0)
+    check(surf >= cfg.boss_radius + d.radius - 0.1, f"보스 몸통 밖으로 밀림 (d={surf:.2f})")
+
+
+def test_protocol_pos_parse():
+    print("\n== 11d) 프로토콜 px/py 파싱 (SessionLink) ==")
+    import raid_streamer
+    link = raid_streamer.SessionLink({}, port=59998)
+    check(link.get_player_pos() is None, "초기 위치 보고 None")
+    link._handle_line(b'{"px": 12.5, "py": 7.25}')
+    check(link.get_player_pos() == (12.5, 7.25), f"px/py 파싱 ({link.get_player_pos()})")
+    # 최신값만 유효(덮어쓰기), 소비하지 않음(유지)
+    link._handle_line(b'{"px": 3.0, "py": 4.0}')
+    check(link.get_player_pos() == (3.0, 4.0), "최신값 덮어쓰기")
+    check(link.get_player_pos() == (3.0, 4.0), "소비하지 않음(유지)")
+    # px/py 라인은 action 을 건드리지 않음
+    a, aim = link.get_action()
+    check(a == int(RaidActionID.STAY) and aim is None, "px/py 라인은 action 불변")
+    link.reset_player_pos()
+    check(link.get_player_pos() is None, "reset_player_pos 후 None")
+
+
 def test_protocol_aim_parse():
     print("\n== 11b) 프로토콜 tx/ty 파싱 (SessionLink) ==")
     import raid_streamer
@@ -826,8 +910,10 @@ def main():
     test_parry()
     test_stagger_gauge()
     test_arena_shrink()
+    test_player_pos_stream()
     test_snapshot_schema()
     test_protocol_aim_parse()
+    test_protocol_pos_parse()
     test_session_protocol()
 
     print("\n" + "=" * 60)

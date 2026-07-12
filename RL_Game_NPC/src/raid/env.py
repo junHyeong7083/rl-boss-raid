@@ -86,6 +86,8 @@ class RaidEnv:
         self._counter_success = False
         self._counter_uid: Optional[int] = None
         self._aim_points: Dict[str, Tuple[float, float]] = {}
+        # 사람이 조종 중인 딜러 uid(위치 스트림 채택 시 세팅). 이 유닛의 MOVE/DASH 이동은 무시.
+        self._human_dealer_uid: Optional[int] = None
         # 패턴 종료 후 강제 휴식 카운터(실시간 페이싱). >0 이면 신규 패턴 시전 보류.
         self._pattern_gap_remaining = 0
         # 원형 아레나 유효 반경(HP 티어 연동, 축소 진행 상태).
@@ -176,9 +178,15 @@ class RaidEnv:
 
     # ────────────── step ──────────────
     def step(self, actions: Dict[str, int],
-             aim_points: Optional[Dict[str, Tuple[float, float]]] = None):
+             aim_points: Optional[Dict[str, Tuple[float, float]]] = None,
+             player_pos: Optional[Tuple[float, float]] = None):
         """aim_points: {"p0": (tx, ty)} — 딜러 조준 설치기(Q/W)의 sim 좌표 조준점.
-        없으면 보스 위치 자동 조준. 사거리 밖은 경계로 클램프."""
+        없으면 보스 위치 자동 조준. 사거리 밖은 경계로 클램프.
+
+        player_pos: (px, py) — 사람이 조종 중인 딜러의 클라 보고 위치(sim 좌표, 최신값).
+        주면 이동 액션 처리 전에 새니티 클램프 후 딜러 위치로 채택(클라이언트 권위). 이 경우
+        딜러의 MOVE/DASH 이동 효과는 무시(위치는 스트림 소유) — DASH 쿨다운/이벤트만 유지.
+        None 이면(no_player/FSM 딜러) 기존 서버 이동 경로."""
         cfg = self.config
         self._aim_points = aim_points or {}
         self._prev_boss_pos = (self.boss.x, self.boss.y)
@@ -187,6 +195,15 @@ class RaidEnv:
         self.current_step += 1
         self._counter_success = False
         self._counter_uid = None
+
+        # 플레이어(딜러) 위치 스트림 채택 — 이동 액션 처리보다 먼저(클라이언트 권위).
+        self._human_dealer_uid = None
+        if player_pos is not None:
+            uid = cfg.player_slot
+            u = self.units.get(uid)
+            if u is not None and u.alive:
+                self._human_dealer_uid = uid
+                self._adopt_player_pos(uid, float(player_pos[0]), float(player_pos[1]))
         # 이번 턴 시작 시 패턴 진행 여부 (종료 감지용 — 패턴 간 휴식 gap 트리거).
         had_pattern = self.boss.active_pattern is not None
 
@@ -298,6 +315,9 @@ class RaidEnv:
             uid = self.uid_of(aid)
             u = self.units.get(uid)
             if not u or not u.alive:
+                continue
+            # 사람이 조종 중인 딜러: 위치는 스트림이 소유 — 이동 액션 무시(facing 은 채택 시 갱신됨).
+            if uid == self._human_dealer_uid:
                 continue
             move_intents[uid] = self._move_delta(u, action)
         for uid in sorted(move_intents.keys()):
@@ -723,6 +743,13 @@ class RaidEnv:
         Unity 잔상용 dash 이벤트(도착 좌표 tx/ty) 방출.
         """
         cfg = self.config
+        # 사람이 조종 중인 딜러: 대시 이동은 클라가 소유 — 쿨다운/이벤트만 유지(연출·쿨 표시용).
+        if u.uid == self._human_dealer_uid:
+            self.step_events[u.uid].append({
+                "type": "dash", "uid": int(u.uid),
+                "tx": float(u.x), "ty": float(u.y),
+            })
+            return
         aim = self._aim_points.get(f"p{u.uid}")
         if aim is not None:
             dx = float(aim[0]) - u.x
@@ -752,6 +779,45 @@ class RaidEnv:
             "type": "dash", "uid": int(u.uid),
             "tx": float(u.x), "ty": float(u.y),
         })
+
+    # ────────────── 플레이어 위치 스트림 채택 (클라이언트 권위) ──────────────
+    def _resolve_player_collision(self, uid: int, x: float, y: float) -> Tuple[float, float]:
+        """보고 위치를 장애물(보스/기둥) 밖으로 밀어낸다 — 클라 ClampDisplayToWorld 미러링."""
+        u = self.units[uid]
+        for ox, oy, orad in self._obstacle_circles():
+            limit = u.radius + orad - 0.05
+            dx = x - ox; dy = y - oy
+            d = math.hypot(dx, dy)
+            if d < limit:
+                if d < 1e-9:
+                    dx, dy, d = 1.0, 0.0, 1.0
+                x = ox + dx / d * limit
+                y = oy + dy / d * limit
+        return x, y
+
+    def _adopt_player_pos(self, uid: int, px: float, py: float):
+        """클라 보고 위치를 새니티 클램프 후 딜러 위치로 채택.
+        (1) 직전 턴 위치에서 player_speed_cap × turn_seconds 이내로 제한(순간이동 방지),
+        (2) 원형 아레나 경계 클램프, (3) 보스/기둥 충돌 밀어내기. facing 은 이동 델타로 갱신."""
+        cfg = self.config
+        u = self.units[uid]
+        ox, oy = u.x, u.y                      # 직전 턴 위치(= step 시작 시점 위치)
+        # (1) 과속 새니티 클램프
+        dx = px - ox; dy = py - oy
+        d = math.hypot(dx, dy)
+        max_d = cfg.player_speed_cap * cfg.turn_seconds
+        if d > max_d and d > 1e-9:
+            px = ox + dx / d * max_d
+            py = oy + dy / d * max_d
+        # (2) 원형 아레나 경계
+        px, py = self._clamp_arena(px, py, u.radius)
+        # (3) 보스/기둥 충돌 밀어내기
+        px, py = self._resolve_player_collision(uid, px, py)
+        # facing 은 이동 델타로 갱신(카운터/패링 조건용)
+        ndx = px - ox; ndy = py - oy
+        if abs(ndx) > 1e-9 or abs(ndy) > 1e-9:
+            u.facing = math.atan2(ndy, ndx)
+        u.x, u.y = px, py
 
     # ────────────── 원형 아레나 ──────────────
     def _in_arena(self, x: float, y: float, radius: float) -> bool:
