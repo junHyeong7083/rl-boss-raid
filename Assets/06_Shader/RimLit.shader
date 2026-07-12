@@ -146,6 +146,8 @@ Shader "BossRaid/RimLit"
             #pragma multi_compile_vertex _ _CASTING_PUNCTUAL_LIGHT_SHADOW
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            // Shadows.hlsl 이 내부에서 LerpWhiteTo 를 사용 — CommonMaterial 을 먼저 포함해야 컴파일됨.
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/CommonMaterial.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
 
             float3 _LightDirection;
