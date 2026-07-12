@@ -233,8 +233,9 @@ namespace BossRaid
             // 돌진 표식 마커(월드 공간, self-contained): viewer 자동 탐색 + 스스로 구독.
             CreateChild<RushMarkView>("RushMark");
 
-            // 절차 합성 사운드(self-contained): viewer 자동 탐색 + OnSnapshotApplied 스스로 구독.
-            CreateChild<RaidAudioManager>("Audio");
+            // 절차 합성 사운드: 사용자 피드백으로 비활성(합성 톤 품질 불만족 — 2026-07-13).
+            // 추후 실제 SFX 팩 도입 시 ProceduralSfx.Get 을 팩 로더로 교체하고 아래 한 줄만 복원.
+            // CreateChild<RaidAudioManager>("Audio");
         }
 
         private void OnEnable()

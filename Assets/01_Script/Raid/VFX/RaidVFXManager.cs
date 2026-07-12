@@ -245,8 +245,9 @@ namespace BossRaid
                 // ① 시전 순간 연출(즉시).
                 HitStopManager.HitStop(0.2f);
                 LostArkCamera.ShakeCamera(0.5f, 0.3f);
-                TryPostFX("PunchAberration", 0.4f);      // BossPostFX 병행 추가 API — 있으면 호출(없으면 스킵)
-                TryPostFX("SetCinematicDoF", 1f);
+                TryPostFX("PunchAberration", 0.4f);      // 자체 감쇠 펄스 — 원복 불필요
+                // NOTE: SetCinematicDoF 는 켜기/끄기 쌍이 필요한 상태성 효과라 궁극기에서 쓰지 않는다
+                // (끄는 호출이 없어 화면이 계속 흐려진 채 남던 버그). DoF 는 데스캠/결과 화면 전용.
                 // ② 조준점 상공 12m 에서 거대 혈월 구체(확대 Drop 투사체) 0.6s 낙하 → 착탄 임팩트.
                 Vector3 from = p + Vector3.up * 12f;
                 LaunchProjectile(from, p, CCrimson, 0.6f, 1.8f, 0f, TrajKind.Drop,
@@ -776,7 +777,11 @@ namespace BossRaid
                                : pt == typeof(float) ? (object)value
                                : null;
                     if (arg != null) m.Invoke(postFX, new[] { arg });
+                    return;
                 }
+                // PunchAberration(strength, decay) 같은 2-float 시그니처 지원(감쇠 기본 2.5).
+                if (ps.Length == 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                    m.Invoke(postFX, new object[] { value, 2.5f });
             }
             catch { /* 시그니처 불일치 등 — 연출은 부가 요소이므로 무시 */ }
         }
