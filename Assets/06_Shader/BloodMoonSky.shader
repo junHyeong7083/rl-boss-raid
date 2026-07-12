@@ -69,10 +69,10 @@ Shader "BossRaid/BloodMoonSky"
                 float thresh = 1.0 - _StarDensity * 0.035;   // 희소
                 float present = step(thresh, h);
                 float d = length(f);
-                float point = smoothstep(0.30, 0.0, d);      // 셀 내 둥근 점
+                float dot_ = smoothstep(0.30, 0.0, d);       // 셀 내 둥근 점 ('point' 는 HLSL 예약어)
                 float bright = frac(h * 13.13);
                 float tw = 0.6 + 0.4 * sin(_Time.y * 2.5 + h * 40.0);   // 미세 반짝임
-                float star = present * point * bright * tw;
+                float star = present * dot_ * bright * tw;
                 star *= smoothstep(-0.05, 0.40, dir.y);       // 고도 위주(지평선 아래 억제)
                 return star;
             }
