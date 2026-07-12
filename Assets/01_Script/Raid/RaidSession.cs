@@ -169,6 +169,10 @@ namespace BossRaid
                 try
                 {
                     var c = new TcpClient();
+                    // Nagle 비활성: 이동/스킬 명령은 수십 바이트 JSON 라인이라 Nagle 이 켜져 있으면
+                    // OS 가 패킷을 모으느라 최대 ~200ms 지연 → 서버가 그 턴을 STAY 처리 → 예측과
+                    // 어긋나 고무줄/순간이동 체감의 핵심 원인이 된다. 반드시 즉시 전송.
+                    c.NoDelay = true;
                     c.Connect(host, port);
                     _tcp = c;
                     _stream = c.GetStream();

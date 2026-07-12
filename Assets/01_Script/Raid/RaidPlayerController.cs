@@ -257,12 +257,11 @@ namespace BossRaid
                 return;
             }
 
-            // 스킬을 이번 턴에 이미 전송했다면 이동은 건너뛴다(스킬 우선).
+            // 스킬을 이번 턴에 이미 전송했다면: 스킬은 방금 스냅샷의 턴에서 소비됐으므로
+            // "지금" 이동을 재전송하는 것은 안전하다(다음 턴 액션이 됨). 기존처럼 return 으로
+            // 한 스냅샷을 더 쉬면 서버가 불필요하게 1턴 더 정지 → 예측과 어긋나 고무줄 체감.
             if (_skipMoveThisTurn)
-            {
-                _skipMoveThisTurn = false;
-                return;
-            }
+                _skipMoveThisTurn = false;   // 소비만 하고 곧바로 이동 재전송으로 진행
 
             SendMoveIfNeeded();
         }
@@ -393,6 +392,7 @@ namespace BossRaid
                 RaidSession.Instance?.SendAction(sk.actionId);
                 skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
                 _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
+                _predictor?.ClearMoveIntent();   // 정직한 예측: 서버가 이 턴 공격(정지)하므로 예측도 정지
             }
         }
 
@@ -505,6 +505,7 @@ namespace BossRaid
             RaidSession.Instance?.SendActionAimed(sk.actionId, sim.x, sim.y);
             skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
+            _predictor?.ClearMoveIntent();   // 정직한 예측: 서버가 이 턴 공격(정지)하므로 예측도 정지
 
             // 시전 방향 즉시 바라보기(서버 facing 과 시각 일치 — "쓴 방향으로 즉시 전환").
             if (_predictor != null && TryGetDealerDisplayPos(out var castFrom))
@@ -628,6 +629,7 @@ namespace BossRaid
             RaidSession.Instance?.SendActionAimed(basicAttackActionId, sim.x, sim.y);
             _lastBasicAttackTime = Time.unscaledTime;
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 평타는 쿨 없음 → 예측 쿨 미설정.
+            _predictor?.ClearMoveIntent();   // 정직한 예측: 평타 연타(카이팅) 중 서버는 정지 — 예측도 정지(고무줄 방지)
 
             // 평타도 쏜 방향을 즉시 바라본다(시전 방향 즉시 전환).
             if (_predictor != null && TryGetDealerDisplayPos(out var castFrom))
@@ -657,6 +659,7 @@ namespace BossRaid
             RaidSession.Instance?.SendAction(parryActionId);
             skillBar?.StartPredictedCooldown(parryCooldownKey, parryCooldown);
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 조준은 유지.
+            _predictor?.ClearMoveIntent();   // 정직한 예측: 패링 턴 서버 정지 — 예측도 정지
         }
 
         /// <summary>패링 유효 쿨다운 = max(서버 스냅샷 "parry", 스킬바 클라 예측).</summary>
