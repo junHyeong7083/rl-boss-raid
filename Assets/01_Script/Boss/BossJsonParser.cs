@@ -162,7 +162,7 @@ namespace BossRaid
                 var targetsRaw = GetList(d, "target_uids");
                 int[] targets = new int[targetsRaw?.Count ?? 0];
                 for (int t = 0; t < targets.Length; t++)
-                    targets[t] = (int)(long)targetsRaw[t];
+                    targets[t] = NumToInt(targetsRaw[t]);
 
                 arr[i] = new TelegraphData
                 {
@@ -207,11 +207,22 @@ namespace BossRaid
             => d != null && d.TryGetValue(k, out var v) && v is string s ? s : null;
 
         // ── Helpers ──
+        // 주의: Python 이 int 성 값을 float()로 감싸 보내면(예: stagger_max=300.0) JSON 파서가
+        // double 로 박싱한다. (int)(long)v 하드캐스트는 InvalidCastException 으로 스냅샷 "전체"
+        // 파싱을 죽였다(캐릭터 미스폰 사고, 2026-07-13) — long/double 둘 다 수용한다.
+        private static int NumToInt(object v)
+        {
+            if (v is long l) return (int)l;
+            if (v is double dd) return (int)System.Math.Round(dd);
+            if (v is int i) return i;
+            return 0;
+        }
+
         private static int GetInt(Dictionary<string, object> d, string k)
-            => d != null && d.TryGetValue(k, out var v) && v != null ? (int)(long)v : 0;
+            => d != null && d.TryGetValue(k, out var v) && v != null ? NumToInt(v) : 0;
 
         private static int GetIntOrDefault(Dictionary<string, object> d, string k, int def)
-            => d != null && d.TryGetValue(k, out var v) && v != null ? (int)(long)v : def;
+            => d != null && d.TryGetValue(k, out var v) && v != null ? NumToInt(v) : def;
 
         private static float GetFloat(Dictionary<string, object> d, string k)
         {
