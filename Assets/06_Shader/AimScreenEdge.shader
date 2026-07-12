@@ -11,6 +11,9 @@ Shader "BossRaid/AimScreenEdge"
     //   Image.color / CanvasRenderer 알파(정점 색 IN.color.a)로 페이드 인/아웃 제어.
     Properties
     {
+        // uGUI Image 는 머티리얼에 _MainTex 프로퍼티가 반드시 있어야 한다
+        // (없으면 Canvas.SendWillRenderCanvases 가 매 프레임 에러 — 크래시처럼 보임).
+        [PerRendererData] _MainTex ("Sprite Texture", 2D) = "white" {}
         [HDR] _Color ("Edge Color (HDR)", Color) = (1.8, 0.15, 0.12, 1)
         _EdgeWidth ("Edge Width (uv)", Range(0.001, 0.5)) = 0.06
         _Softness ("Edge Softness", Range(0.0, 3.0)) = 1.5
