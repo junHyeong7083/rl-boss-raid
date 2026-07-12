@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
 using UnityEngine.InputSystem;
@@ -72,6 +73,10 @@ namespace BossRaid
         private float _shakeElapsed;            // 경과 시간
         private Vector2 _shakeSeed;             // Perlin 오프셋(호출마다 랜덤)
 
+        // 데스캠(보스 처치 클로즈업) 상태
+        private bool _deathCamActive;           // true 동안 LateUpdate 추적/셰이크 정지 (코루틴이 직접 배치)
+        private Coroutine _deathCamCo;
+
         private void Awake()
         {
             Instance = this;
@@ -124,6 +129,9 @@ namespace BossRaid
 
         private void LateUpdate()
         {
+            // 데스캠 진행 중에는 추적/셰이크를 멈추고 코루틴이 카메라를 직접 배치한다.
+            if (_deathCamActive) return;
+
             // 1) 타깃 확보(스폰 전이면 매 프레임 재시도). 이미 잡은 타깃이 파괴되면 마지막 위치 유지.
             AcquireTargetIfNeeded();
 
@@ -201,6 +209,60 @@ namespace BossRaid
         public static void ShakeCamera(float amplitude, float duration)
         {
             if (Instance != null) Instance.Shake(amplitude, duration);
+        }
+
+        // ─────────────── 데스캠 (보스 처치 연출) ───────────────
+
+        /// <summary>
+        /// 보스 처치 순간 클로즈업. 보스 주위를 1.8초 동안 반원(180°) 회전하며
+        /// 서서히 당겨 잡은 뒤, 추적으로 자연스럽게 복귀한다.
+        /// HitStop(Time.timeScale≈0) 중에도 진행되도록 전 구간 unscaled time 사용.
+        /// GameFlowUI 가 스냅샷에서 보스 HP 0 을 감지한 순간 호출한다.
+        /// </summary>
+        public void PlayDeathCam(Vector3 bossPos)
+        {
+            if (_deathCamCo != null) StopCoroutine(_deathCamCo);
+            _deathCamCo = StartCoroutine(DeathCamRoutine(bossPos));
+        }
+
+        private IEnumerator DeathCamRoutine(Vector3 bossPos)
+        {
+            _deathCamActive = true;
+
+            const float duration = 1.8f;
+            const float sweep = Mathf.PI;          // 반원(180°) 회전
+            Vector3 focus = bossPos + Vector3.up * 1.2f;   // 보스 가슴 높이
+
+            // 시작 각도: 현재 카메라가 보스를 기준으로 놓인 방향(XZ 평면)에서 이어붙여 튐 방지.
+            Vector3 flat = transform.position - focus; flat.y = 0f;
+            float startAngle = flat.sqrMagnitude > 1e-4f ? Mathf.Atan2(flat.z, flat.x) : 0f;
+
+            const float startRadius = 13f, endRadius = 8.5f;   // 서서히 당김
+            const float startHeight = 7f, endHeight = 4.5f;    // 눈높이로 하강
+
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float k = Mathf.Clamp01(t / duration);
+                float ease = Mathf.SmoothStep(0f, 1f, k);
+
+                float ang = startAngle + sweep * ease;
+                float r = Mathf.Lerp(startRadius, endRadius, ease);
+                float h = Mathf.Lerp(startHeight, endHeight, ease);
+
+                Vector3 pos = focus + new Vector3(Mathf.Cos(ang) * r, h, Mathf.Sin(ang) * r);
+                transform.position = pos;
+                transform.rotation = Quaternion.LookRotation(focus - pos, Vector3.up);
+                yield return null;
+            }
+
+            // 추적으로 복귀: SmoothDamp 기준 위치를 현재 위치로 맞춰 다음 프레임 점프 방지.
+            _basePosition = transform.position;
+            _followVelocity = Vector3.zero;
+            _hasFocus = true;
+            _deathCamActive = false;
+            _deathCamCo = null;
         }
 
         /// <summary>이번 프레임 셰이크 오프셋 계산 + 시간 진행/감쇠.</summary>

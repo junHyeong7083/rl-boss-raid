@@ -239,6 +239,19 @@ namespace BossRaid
                 LaunchProjectile(from, p, CCrimson, 0.35f, 0.9f, 0f, TrajKind.Drop,
                     () => ImpactSkillW(ev, p, r, bossPos));
             }
+            else if (ev.skill_id == "ult")
+            {
+                // R 혈월 처형(궁극): 시전 순간 슬로모+강 셰이크(+PostFX), 상공 12m 거대 혈월 구체 낙하 → 대형 착탄.
+                // ① 시전 순간 연출(즉시).
+                HitStopManager.HitStop(0.2f);
+                LostArkCamera.ShakeCamera(0.5f, 0.3f);
+                TryPostFX("PunchAberration", 0.4f);      // BossPostFX 병행 추가 API — 있으면 호출(없으면 스킵)
+                TryPostFX("SetCinematicDoF", 1f);
+                // ② 조준점 상공 12m 에서 거대 혈월 구체(확대 Drop 투사체) 0.6s 낙하 → 착탄 임팩트.
+                Vector3 from = p + Vector3.up * 12f;
+                LaunchProjectile(from, p, CCrimson, 0.6f, 1.8f, 0f, TrajKind.Drop,
+                    () => ImpactUltimate(ev, p, r, bossPos));
+            }
             else
             {
                 // Q 혈창: 0.18s 직선+살짝 포물선(중간 높이 +1.2), 길쭉한 진홍 창 → 도착 시 관통 임팩트.
@@ -330,6 +343,36 @@ namespace BossRaid
             }
             if (ev.hit)
                 ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CCrimson, 24, 6f, 0.35f, 0.4f);
+        }
+
+        /// <summary>R 궁극 '혈월 처형' 착탄: 3중 링웨이브(실판정 r 일치) + 대형 버스트 + 붉은 플래시 +
+        /// 강 셰이크 + 잔광 데칼 0.6s. 무게감을 위해 명중 여부와 무관하게 지면 충격을 낸다.</summary>
+        private void ImpactUltimate(EventData ev, Vector3 p, float r, Vector3 bossPos)
+        {
+            // 잔광 데칼 0.6s (명중/크리/빗나감 분기).
+            Color decalBase, decalOutline; float peakAlpha;
+            if (ev.hit && ev.crit)  { decalBase = CCrimson; decalOutline = CGold * 3.4f;  peakAlpha = 1.0f; }
+            else if (ev.hit)        { decalBase = CCrimson; decalOutline = CRed * 2.6f;   peakAlpha = 0.85f; }
+            else                    { decalBase = CBrown;   decalOutline = CBrown * 1.4f;  peakAlpha = 0.4f; }
+            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.6f);
+
+            // 3중 링웨이브(외곽 진홍 → 중간 적 → 내곽 금). 외곽 반경은 실판정 r 에 맞춤.
+            ProceduralVFX.RingWave(p, CCrimson, r * 1.4f, 0.6f);
+            ProceduralVFX.RingWave(p, CRed,     r * 1.0f, 0.5f);
+            ProceduralVFX.RingWave(p, CGold,    r * 0.6f, 0.4f);
+
+            // 대형 버스트 + 파편.
+            ProceduralVFX.Burst(p, CCrimson, 80, 12f, 0.75f, 0.7f);
+            ProceduralVFX.Burst(p, CGold,    50, 10f, 0.6f, 0.5f);
+            ProceduralVFX.Debris(p, CBrown);
+
+            // 화면 붉은 플래시 + 강 셰이크 + 무게감 히트스톱.
+            Flash(CRed, 0.5f);
+            LostArkCamera.ShakeCamera(0.6f, 0.4f);
+            HitStopManager.HitStop(ev.crit ? 0.18f : 0.12f);
+
+            if (ev.hit)
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.4f, CCrimson, 30, 7f, 0.4f, 0.45f);
         }
 
         // ─────────────── 투사체 발사 + 풀링 ───────────────
@@ -707,6 +750,35 @@ namespace BossRaid
         {
             if (postFX == null) postFX = FindFirstObjectByType<BossPostFX>();
             if (postFX != null) postFX.FlashScreen(c, dur);
+        }
+
+        /// <summary>
+        /// BossPostFX 의 선택적 시네마틱 API(PunchAberration/SetCinematicDoF 등) 안전 호출.
+        /// 이 메서드들은 병행 작업으로 추가되는 중이라 직접 호출을 금하고, 리플렉션으로
+        /// "존재 확인 후" 파라미터 타입에 맞춰 호출한다(미존재/시그니처 불일치 시 조용히 스킵).
+        /// </summary>
+        private void TryPostFX(string method, float value)
+        {
+            if (postFX == null) postFX = FindFirstObjectByType<BossPostFX>();
+            if (postFX == null || string.IsNullOrEmpty(method)) return;
+            var m = postFX.GetType().GetMethod(method,
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+            if (m == null) return;
+            var ps = m.GetParameters();
+            try
+            {
+                if (ps.Length == 0) { m.Invoke(postFX, null); return; }
+                if (ps.Length == 1)
+                {
+                    var pt = ps[0].ParameterType;
+                    object arg = pt == typeof(bool)  ? (object)true
+                               : pt == typeof(int)   ? (object)Mathf.RoundToInt(value)
+                               : pt == typeof(float) ? (object)value
+                               : null;
+                    if (arg != null) m.Invoke(postFX, new[] { arg });
+                }
+            }
+            catch { /* 시그니처 불일치 등 — 연출은 부가 요소이므로 무시 */ }
         }
     }
 }

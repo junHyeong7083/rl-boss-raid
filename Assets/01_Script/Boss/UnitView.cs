@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace BossRaid
@@ -56,9 +58,84 @@ namespace BossRaid
         /// <summary>예측기 계약: 예측 오프셋이 섞이지 않은 권위 렌더 위치. 첫 데이터 전에는 transform 폴백.</summary>
         public Vector3 AuthoritativePosition => _hasData ? _authPos : transform.position;
 
+        // ─────────────── 피격 플래시 / 사망 디졸브 (MPB, 머티리얼 신규 인스턴스 생성 금지) ───────────────
+        [Header("Juice (피격/사망 연출)")]
+        [Tooltip("피격 흰 플래시 지속(초, unscaled)")]
+        public float hitFlashDuration = 0.08f;
+        [Tooltip("피격 플래시 밝기 배수(1.5 = 흰색 1.5배)")]
+        public float hitFlashIntensity = 1.5f;
+        [Tooltip("사망 디졸브 시간(초)")]
+        public float deathDissolveDuration = 1.2f;
+        [Tooltip("사망 시 최종 스케일 배수")]
+        public float deathShrink = 0.85f;
+        [Tooltip("사망 시 가라앉는 깊이(월드 y). URP Lit 불투명이라 알파가 안 먹으면 이 침강+수축이 대체 연출")]
+        public float deathSink = 0.6f;
+
+        private Renderer[] _fxRenderers;            // 본체 렌더러 캐시(Awake 1회). 파티클/라인/HP바/이펙트 제외
+        private MaterialPropertyBlock _mpb;
+        private Color[] _fxBaseColors;              // 렌더러별 원본 베이스컬러(역할 틴트 반영) — lazy 캐시
+        private bool _fxColorsReady;
+        private Coroutine _flashCo;
+        private Coroutine _dissolveCo;
+        private Vector3 _baseScale;
+        private bool _baseScaleCaptured;
+        private float _deathSinkY;                  // LateUpdate 에서 적용하는 침강량
+        private bool _isDissolved;                  // 디졸브 진행/완료(피격 플래시 억제용)
+
+        private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+        private static readonly int ColorId     = Shader.PropertyToID("_Color");
+        private static readonly int EmissionId  = Shader.PropertyToID("_EmissionColor");
+
         private void Awake()
         {
             if (animator == null) animator = GetComponentInChildren<Animator>();
+            _mpb = new MaterialPropertyBlock();
+            CacheFxRenderers();
+        }
+
+        /// <summary>본체 렌더러만 캐시. HP바/디스이펙트/버프이펙트/파티클/라인/트레일은 플래시 대상 제외.</summary>
+        private void CacheFxRenderers()
+        {
+            var rs = GetComponentsInChildren<Renderer>(true);
+            var list = new List<Renderer>(rs.Length);
+            foreach (var r in rs)
+            {
+                if (r == null) continue;
+                if (r is ParticleSystemRenderer || r is LineRenderer || r is TrailRenderer) continue;
+                if (IsUnder(r.transform, hpBarRoot) || IsUnder(r.transform, deathEffect) ||
+                    IsUnder(r.transform, shieldEffect) || IsUnder(r.transform, buffAtkEffect) ||
+                    IsUnder(r.transform, guardEffect)) continue;
+                list.Add(r);
+            }
+            _fxRenderers = list.ToArray();
+        }
+
+        private static bool IsUnder(Transform t, GameObject root)
+            => root != null && t != null && t.IsChildOf(root.transform);
+
+        /// <summary>역할 틴트가 머티리얼에 반영된 뒤(첫 피격/사망 시) 원본 컬러 캡처 + 이미시브 키워드 보장.</summary>
+        private void EnsureFxColors()
+        {
+            if (_fxColorsReady || _fxRenderers == null) return;
+            _fxColorsReady = true;
+            _fxBaseColors = new Color[_fxRenderers.Length];
+            for (int i = 0; i < _fxRenderers.Length; i++)
+            {
+                var r = _fxRenderers[i];
+                Color c = Color.white;
+                if (r != null)
+                {
+                    var m = r.sharedMaterial;   // 틴트로 이미 인스턴스화된 머티리얼
+                    if (m != null)
+                    {
+                        if (m.HasProperty(BaseColorId)) c = m.GetColor(BaseColorId);
+                        else if (m.HasProperty(ColorId)) c = m.GetColor(ColorId);
+                        // 이미시브 플래시가 보이도록 키워드 활성(기존 인스턴스에만 적용 — 신규 인스턴스 없음)
+                        if (m.HasProperty(EmissionId)) r.material.EnableKeyword("_EMISSION");
+                    }
+                }
+                _fxBaseColors[i] = c;
+            }
         }
 
         public void ApplySnapshot(UnitData u)
@@ -99,6 +176,9 @@ namespace BossRaid
                 if (deathEffect) deathEffect.SetActive(!u.alive);
                 SafeSetBool(paramDead, !u.alive);
 
+                // 사망 진입: 비활성 대신 디졸브(수축+침강, 알파 베스트에포트). 부활 시 원복.
+                if (!u.alive) StartDissolve();
+
                 // 부활: Dead=false 만으로는 사망 상태에서 못 나온다(사망 스테이트에 출구 전이가
                 // 없는 컨트롤러가 일반적) → 애니메이터를 초기 상태로 강제 리셋.
                 if (revived && animator != null)
@@ -107,6 +187,9 @@ namespace BossRaid
                     animator.Update(0f);
                     SafeSetBool(paramDead, false);   // Rebind 가 파라미터도 초기화하므로 재보증
                 }
+
+                // 부활: 디졸브 원복(스케일/침강/컬러 복원). 기존 Rebind 부활 로직과 공존.
+                if (revived) RestoreFromDeath();
             }
         }
 
@@ -144,7 +227,7 @@ namespace BossRaid
                 case "heal":         SafeSetTrigger(trigHeal); break;
                 case "taunt":        SafeSetTrigger(trigTaunt); break;
                 case "buff":         SafeSetTrigger(trigBuff); break;
-                case "damage_taken": SafeSetTrigger(trigHit); break;
+                case "damage_taken": SafeSetTrigger(trigHit); FlashHit(); break;
                 case "death":        SafeSetBool(paramDead, true); break;
             }
         }
@@ -202,9 +285,113 @@ namespace BossRaid
 
         private void LateUpdate()
         {
+            // 사망 침강: Update 가 transform.position(y=base)를 덮으므로 이후 LateUpdate 에서 오프셋 적용.
+            if (_deathSinkY > 0f) transform.position -= Vector3.up * _deathSinkY;
+
             // 표식이 꺼져야 하면 여기서 제어 (스냅샷의 marked 필드로)
             if (_markInstance != null && _hasData && !_latest.marked)
                 _markInstance.SetActive(false);
+        }
+
+        // ─────────────── 피격 흰 플래시 ───────────────
+
+        /// <summary>damage_taken 이벤트 시 본체를 짧게 흰색(1.5배)으로 플래시 후 원복. 사망 중엔 무시.</summary>
+        public void FlashHit()
+        {
+            if (_isDissolved || !isActiveAndEnabled) return;
+            EnsureFxColors();
+            if (_flashCo != null) StopCoroutine(_flashCo);
+            _flashCo = StartCoroutine(FlashRoutine());
+        }
+
+        private IEnumerator FlashRoutine()
+        {
+            float t = 0f;
+            float dur = Mathf.Max(0.01f, hitFlashDuration);
+            Color flash = Color.white * hitFlashIntensity;
+            while (t < dur)
+            {
+                t += Time.unscaledDeltaTime;      // 히트스톱(timeScale=0)과 무관하게 감쇠
+                float k = 1f - Mathf.Clamp01(t / dur);
+                for (int i = 0; i < _fxRenderers.Length; i++)
+                {
+                    var r = _fxRenderers[i];
+                    if (r == null) continue;
+                    r.GetPropertyBlock(_mpb);
+                    Color baseC = _fxBaseColors != null ? _fxBaseColors[i] : Color.white;
+                    Color lit = Color.Lerp(baseC, flash, k);
+                    _mpb.SetColor(BaseColorId, lit);
+                    _mpb.SetColor(ColorId, lit);
+                    _mpb.SetColor(EmissionId, flash * k);
+                    r.SetPropertyBlock(_mpb);
+                }
+                yield return null;
+            }
+            ClearMpb();   // MPB 제거 → 머티리얼(역할 틴트) 원복
+            _flashCo = null;
+        }
+
+        private void ClearMpb()
+        {
+            if (_fxRenderers == null) return;
+            foreach (var r in _fxRenderers)
+                if (r != null) r.SetPropertyBlock(null);
+        }
+
+        // ─────────────── 사망 디졸브 ───────────────
+
+        private void StartDissolve()
+        {
+            if (!_baseScaleCaptured) { _baseScale = transform.localScale; _baseScaleCaptured = true; }
+            EnsureFxColors();
+            if (_flashCo != null) { StopCoroutine(_flashCo); _flashCo = null; }
+            if (_dissolveCo != null) StopCoroutine(_dissolveCo);
+            _dissolveCo = StartCoroutine(DissolveRoutine());
+        }
+
+        private IEnumerator DissolveRoutine()
+        {
+            _isDissolved = true;
+            float t = 0f;
+            float dur = Mathf.Max(0.01f, deathDissolveDuration);
+            while (t < dur)
+            {
+                t += Time.deltaTime;
+                float k = Mathf.Clamp01(t / dur);
+                transform.localScale = Vector3.Lerp(_baseScale, _baseScale * deathShrink, k);
+                _deathSinkY = Mathf.Lerp(0f, deathSink, k);
+                ApplyDissolveAlpha(1f - k);   // 알파 베스트에포트(투명 서피스면 페이드, 불투명이면 무시됨)
+                yield return null;
+            }
+            transform.localScale = _baseScale * deathShrink;
+            _deathSinkY = deathSink;
+            ApplyDissolveAlpha(0f);
+            _dissolveCo = null;   // 완료 후 상태 유지(비활성화하지 않음)
+        }
+
+        private void ApplyDissolveAlpha(float a)
+        {
+            if (_fxRenderers == null) return;
+            for (int i = 0; i < _fxRenderers.Length; i++)
+            {
+                var r = _fxRenderers[i];
+                if (r == null) continue;
+                r.GetPropertyBlock(_mpb);
+                Color c = _fxBaseColors != null ? _fxBaseColors[i] : Color.white;
+                c.a = a;
+                _mpb.SetColor(BaseColorId, c);
+                _mpb.SetColor(ColorId, c);
+                r.SetPropertyBlock(_mpb);
+            }
+        }
+
+        private void RestoreFromDeath()
+        {
+            if (_dissolveCo != null) { StopCoroutine(_dissolveCo); _dissolveCo = null; }
+            _isDissolved = false;
+            _deathSinkY = 0f;
+            if (_baseScaleCaptured) transform.localScale = _baseScale;
+            ClearMpb();
         }
     }
 }

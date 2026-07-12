@@ -68,6 +68,7 @@ namespace BossRaid
             new SkillBinding { label = "혈월 낙하", key = KeyCode.W,     actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40 },
             new SkillBinding { label = "카운터",   key = KeyCode.E,     actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 25 },
             new SkillBinding { label = "기본공격", key = KeyCode.Space, actionId = 9,  cooldownKey = "",        aimed = true,  range = 5f, aoeRadius = 1.2f, maxCooldown = 0 },
+            new SkillBinding { label = "혈월 처형", key = KeyCode.R,     actionId = 20, cooldownKey = "ult",     aimed = true,  range = 9f, aoeRadius = 4.0f, maxCooldown = 200 },
         };
 
         [Header("Dash (Shift, 즉발 방향기 — skills 배열과 별도 처리)")]
@@ -118,6 +119,7 @@ namespace BossRaid
         private bool _snapshotSubscribed;
         private UnitData _dealerData;                 // 최신 스냅샷의 딜러 유닛(쿨다운 조회용)
         private DealerMotionPredictor _predictor;     // 딜러 클라이언트 사이드 예측기(딜러 스폰 시 부착)
+        private DealerAnimationDriver _animDriver;     // 딜러 액션별 원샷 애니 재생기(딜러 스폰 시 부착)
         private int _lastSentMoveAction = -1;         // 즉시 전송 중복 방지(드래그 중 같은 방향이면 스킵)
         private SkillBinding _aiming;                 // 현재 조준 중인 스킬 (null = 조준 아님)
 
@@ -217,6 +219,7 @@ namespace BossRaid
         {
             if (!_snapshotSubscribed) TrySubscribe();
             EnsurePredictor();
+            EnsureAnimDriver();
 
             if (!InputActive())
             {
@@ -258,6 +261,17 @@ namespace BossRaid
             if (viewer == null || !viewer.TryGetDealerTransform(out var dealer) || dealer == null) return;
             _predictor = dealer.GetComponent<DealerMotionPredictor>();
             if (_predictor == null) _predictor = dealer.gameObject.AddComponent<DealerMotionPredictor>();
+        }
+
+        /// <summary>딜러 액션별 원샷 애니 재생기 부착(1회). 프리팹에 이미 있으면 그것을 재사용.
+        /// 프리팹 인스턴스면 [SerializeField] 클립(예: Roll)이 이미 배선돼 있고, 런타임 AddComponent
+        /// 폴백 시엔 컨트롤러 animationClips 이름 조회(전략 a)로 확보 가능한 클립만 재생한다.</summary>
+        private void EnsureAnimDriver()
+        {
+            if (_animDriver != null) return;
+            if (viewer == null || !viewer.TryGetDealerTransform(out var dealer) || dealer == null) return;
+            _animDriver = dealer.GetComponent<DealerAnimationDriver>();
+            if (_animDriver == null) _animDriver = dealer.gameObject.AddComponent<DealerAnimationDriver>();
         }
 
         private bool InputActive()

@@ -2370,6 +2370,14 @@ MonoBehaviour:
     range: 0
     aoeRadius: 0
     maxCooldown: 25
+  - label: "\uD608\uC6D4 \uCC98\uD615"
+    key: 114
+    actionId: 20
+    cooldownKey: ult
+    aimed: 1
+    range: 9
+    aoeRadius: 4
+    maxCooldown: 200
   - label: "\uAE30\uBCF8\uACF5\uACA9"
     key: 32
     actionId: 9

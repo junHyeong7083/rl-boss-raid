@@ -500,9 +500,66 @@ def test_aim_skills():
                   for e in env.step_events.get(tank_uid, []))
     check(invalid, "W 타 역할 사용 시 invalid_action")
 
-    # (g) 스냅샷 딜러 cooldowns 키 = skill/skill2/counter/dash
+    # (g) 스냅샷 딜러 cooldowns 키 = skill/skill2/counter/dash/ult
     keys = set(env.get_snapshot()["units"][env.config.player_slot]["cooldowns"].keys())
-    check(keys == {"skill", "skill2", "counter", "dash"}, f"딜러 cooldowns 키 {sorted(keys)}")
+    check(keys == {"skill", "skill2", "counter", "dash", "ult"}, f"딜러 cooldowns 키 {sorted(keys)}")
+
+
+# ─────────────────── 6e. 딜러 궁극기 '혈월 처형' (ULTIMATE) ───────────────────
+
+def test_ultimate():
+    print("\n== 6e) 딜러 궁극기 '혈월 처형' (ULTIMATE) ==")
+    cfg = RaidConfig()
+
+    # (a) 명중 + 대형 피해 + 쿨다운(200) 적용
+    env = _fresh_env_for_aim(81)
+    dealer = env.units[env.config.player_slot]
+    dealer.x, dealer.y = 5.0, 10.0        # 보스와 5m (ult 사거리 9 이내)
+    hp0 = env.boss.hp
+    ev = _dealer_cast(env, RaidActionID.ULTIMATE, (10.0, 10.0))
+    check(ev is not None and ev.get("skill") == "ult", "R player_skill_cast(ult) 이벤트")
+    check(ev is not None and ev.get("hit") is True, "궁극 보스 명중 (hit=True)")
+    check(ev is not None and "crit" in ev, "궁극 crit 필드 존재")
+    check(ev is not None and abs(ev.get("radius", 0) - cfg.aim_ult_radius) < 1e-6,
+          f"궁극 반경 필드({cfg.aim_ult_radius})")
+    dmg = hp0 - env.boss.hp
+    check(dmg >= cfg.aim_ult_damage - cfg.boss_defense - 1, f"궁극 대형 피해 ({dmg})")
+    # 시전 스텝 종료 시 쿨다운 틱이 1 차감 → 200 세팅 후 199 로 관측(타 스킬과 동일 규칙).
+    ult_cd_full = cfg.skill_cooldowns[int(RaidActionID.ULTIMATE)]
+    check(dealer.cooldowns.get(int(RaidActionID.ULTIMATE), 0) >= ult_cd_full - 1,
+          f"궁극 쿨다운 200 적용 (관측 {dealer.cooldowns.get(int(RaidActionID.ULTIMATE), 0)}/{ult_cd_full})")
+
+    # (b) 무력화(스태거) 활성 중 대량 게이지 기여(ult_stagger_contrib)
+    env = _fresh_env_for_aim(82)
+    dealer = env.units[env.config.player_slot]
+    dealer.x, dealer.y = 5.0, 10.0
+    env.boss.stagger_active = True
+    env.boss.stagger_gauge = cfg.stagger_gauge   # 200
+    ev = _dealer_cast(env, RaidActionID.ULTIMATE, (10.0, 10.0))
+    contrib_ev = next((e for e in env.step_events.get(env.config.player_slot, [])
+                       if e.get("type") == "stagger_contribute"), None)
+    check(contrib_ev is not None and abs(contrib_ev.get("amount", 0) - cfg.ult_stagger_contrib) < 1e-6,
+          f"궁극 스태거 기여 {cfg.ult_stagger_contrib} (실제 {contrib_ev.get('amount') if contrib_ev else '?'})")
+    check(abs(env.boss.stagger_gauge - (cfg.stagger_gauge - cfg.ult_stagger_contrib)) < 1e-6,
+          f"스태거 게이지 차감 (={env.boss.stagger_gauge})")
+
+    # (c) 딜러 전용 (탱커 사용 시 invalid_action)
+    env = _fresh_env_for_aim(83)
+    tank_uid = next(u.uid for u in env.units.values() if u.role == PartyRole.TANK)
+    actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
+    actions[f"p{tank_uid}"] = int(RaidActionID.ULTIMATE)
+    env.step(actions)
+    invalid = any(e.get("type") == "invalid_action"
+                  for e in env.step_events.get(tank_uid, []))
+    check(invalid, "궁극 타 역할 사용 시 invalid_action")
+
+    # (d) 쿨다운 중 재사용 차단 (STAY 처리 — 이벤트 없음)
+    env = _fresh_env_for_aim(84)
+    dealer = env.units[env.config.player_slot]
+    dealer.x, dealer.y = 5.0, 10.0
+    _dealer_cast(env, RaidActionID.ULTIMATE, (10.0, 10.0))   # 1회 시전 → 쿨 200
+    ev2 = _dealer_cast(env, RaidActionID.ULTIMATE, (10.0, 10.0))   # 쿨 중 재시도
+    check(ev2 is None, "쿨다운 중 궁극 재시전 차단 (cast 이벤트 없음)")
 
 
 def test_protocol_aim_parse():
@@ -649,6 +706,7 @@ def main():
     test_seal_success()
     test_seal_fail()
     test_aim_skills()
+    test_ultimate()
     test_protocol_aim_parse()
     test_snapshot_schema()
     test_session_protocol()

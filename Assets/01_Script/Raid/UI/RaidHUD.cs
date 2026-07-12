@@ -232,6 +232,9 @@ namespace BossRaid
 
             // 돌진 표식 마커(월드 공간, self-contained): viewer 자동 탐색 + 스스로 구독.
             CreateChild<RushMarkView>("RushMark");
+
+            // 절차 합성 사운드(self-contained): viewer 자동 탐색 + OnSnapshotApplied 스스로 구독.
+            CreateChild<RaidAudioManager>("Audio");
         }
 
         private void OnEnable()

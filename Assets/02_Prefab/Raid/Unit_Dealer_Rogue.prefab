@@ -10,6 +10,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1152477846589334870}
   - component: {fileID: 7590634990764448553}
+  - component: {fileID: 7590634990764448560}
   m_Layer: 0
   m_Name: Unit_Dealer_Rogue
   m_TagString: Untagged
@@ -64,6 +65,26 @@ MonoBehaviour:
   shieldEffect: {fileID: 0}
   buffAtkEffect: {fileID: 0}
   guardEffect: {fileID: 0}
+--- !u!114 &7590634990764448560
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6304455134396228705}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d3a7c1e94b8f2a6d5c0e1f3b4a5d6e7f, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  viewer: {fileID: 0}
+  animator: {fileID: 3528359751389114634}
+  extraClips:
+  - {fileID: -7580519143377161132, guid: dc9dd357dc24557499aeb6adede232a4, type: 3}
+  - {fileID: 3652271745547467155, guid: dc9dd357dc24557499aeb6adede232a4, type: 3}
+  - {fileID: 8770290818187828601, guid: dc9dd357dc24557499aeb6adede232a4, type: 3}
+  - {fileID: -4592842328519117816, guid: dc9dd357dc24557499aeb6adede232a4, type: 3}
+  ultSpeed: 0.9
 --- !u!1001 &7034013308366998683
 PrefabInstance:
   m_ObjectHideFlags: 0

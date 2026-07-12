@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using UnityEngine;
 
 namespace BossRaid
@@ -57,10 +58,38 @@ namespace BossRaid
         [Tooltip("Target까지 이 거리 이상이면 이동 중으로 판정")]
         public float movingThreshold = 0.05f;
 
+        [Header("Juice - 피격 플래시/틴트 (MPB, 배칭 보존)")]
+        [Tooltip("플레이어 딜 명중 시 흰 플래시 지속(초)")]
+        public float hitFlashDuration = 0.06f;
+        [Tooltip("플래시 이미시브 밝기 배수")]
+        public float hitFlashIntensity = 2.0f;
+        [Tooltip("플래시 스팸 방지 최소 간격(초)")]
+        public float hitFlashMinInterval = 0.1f;
+        [Tooltip("크리티컬 시 붉은 플래시 색")]
+        public Color critFlashColor = new Color(1f, 0.3f, 0.25f);
+        [Tooltip("그로기/스턴 중 파르스름 이미시브 틴트")]
+        public Color groggyTint = new Color(0.45f, 0.7f, 1.15f);
+        [Tooltip("무력화(그로기 진입) 성공 순간 보라 플래시 색")]
+        public Color staggerFlashColor = new Color(0.7f, 0.35f, 1f);
+
+        private MaterialPropertyBlock _bossMpb;
+        private Coroutine _bossFlashCo;
+        private bool _bossEmissionReady;
+        private bool _grogTintActive;
+        private float _lastFlashTime = -999f;
+
+        private static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+        private static readonly int EmissionId  = Shader.PropertyToID("_EmissionColor");
+
         private SnapshotLerp _lerp;           // 적응형 스냅샷 보간 상태
         private Quaternion _targetRot = Quaternion.identity;
         private BossData _latestData;
         private bool _hasData;
+
+        private void Awake()
+        {
+            _bossMpb = new MaterialPropertyBlock();
+        }
 
         // 이전 프레임 텔레그래프 상태 (신규 발동 감지용)
         private readonly System.Collections.Generic.HashSet<int> _prevTelegraphIds = new System.Collections.Generic.HashSet<int>();
@@ -96,6 +125,12 @@ namespace BossRaid
             // V2 카운터 발광: counter_window > 0 이면 파란 이미시브 틴트, 끝나면 원복
             ApplyCounterGlow(b.counter_window > 0);
 
+            // 플레이어 딜 명중 시 흰/붉은 플래시 (이번 스냅샷 events 에서 damage/uid 0 검사)
+            DetectPlayerHits();
+
+            // 그로기/스턴 파르스름 지속 틴트 갱신
+            UpdateGroggyTint(grogOrStun);
+
             // 타격감 훅: 상태 전이 감지 → 포스트FX/히트스톱/카메라 흔들림
             DetectImpactTransitions(b);
         }
@@ -129,11 +164,12 @@ namespace BossRaid
                 OnBigImpact?.Invoke(0.6f, 0.35f);   // (amplitude, duration)
             }
 
-            // 그로기 진입 (스태거 성공)
+            // 그로기 진입 (스태거 성공) — 무력화 성공 보라 플래시
             if (groggyNow && !_prevGroggy)
             {
                 HitStopManager.HitStop(0.15f);
                 OnBigImpact?.Invoke(0.45f, 0.3f);
+                BossFlash(staggerFlashColor, hitFlashIntensity, 0.18f);
             }
 
             _prevPhase = b.phase;
@@ -204,6 +240,101 @@ namespace BossRaid
                 if (m == null || !m.HasProperty("_EmissionColor")) continue;
                 if (on) m.EnableKeyword("_EMISSION");
                 m.SetColor("_EmissionColor", emis);
+            }
+        }
+
+        // ─────────────── 피격 플래시 / 그로기 틴트 (MPB) ───────────────
+
+        /// <summary>이번 스냅샷 events 에서 플레이어(uid 0) damage 를 찾아 플래시. 크리면 붉게.</summary>
+        private void DetectPlayerHits()
+        {
+            var snap = viewer != null ? viewer.LatestSnapshot : null;
+            if (snap == null || snap.events == null) return;
+
+            bool hit = false, crit = false;
+            foreach (var ev in snap.events)
+            {
+                if (ev == null) continue;
+                if (ev.type == "damage" && ev.uid == 0)   // 딜러 → 보스 타격
+                {
+                    hit = true;
+                    if (ev.crit) crit = true;
+                }
+            }
+            if (!hit) return;
+            if (Time.unscaledTime - _lastFlashTime < hitFlashMinInterval) return;   // 스팸 방지
+            _lastFlashTime = Time.unscaledTime;
+            BossFlash(crit ? critFlashColor : Color.white, hitFlashIntensity, hitFlashDuration);
+        }
+
+        /// <summary>그로기/스턴 지속 파르스름 틴트 on/off. 상태 변화 시에만 갱신.</summary>
+        private void UpdateGroggyTint(bool grogOrStun)
+        {
+            if (grogOrStun == _grogTintActive) return;
+            _grogTintActive = grogOrStun;
+            EnsureBossEmission();
+            if (_bossFlashCo == null) RestoreBossPersistent();   // 플래시 중이면 종료 시 반영됨
+        }
+
+        /// <summary>보스 본체 이미시브 플래시 (unscaled 감쇠). 종료 후 지속 상태(그로기 틴트/원복)로 복귀.</summary>
+        private void BossFlash(Color color, float intensity, float duration)
+        {
+            if (bodyRenderers == null || bodyRenderers.Length == 0) return;
+            EnsureBossEmission();
+            if (_bossFlashCo != null) StopCoroutine(_bossFlashCo);
+            _bossFlashCo = StartCoroutine(BossFlashRoutine(color, intensity, Mathf.Max(0.01f, duration)));
+        }
+
+        private IEnumerator BossFlashRoutine(Color color, float intensity, float duration)
+        {
+            float t = 0f;
+            while (t < duration)
+            {
+                t += Time.unscaledDeltaTime;
+                float k = 1f - Mathf.Clamp01(t / duration);
+                SetBossEmission(color * intensity * k);
+                yield return null;
+            }
+            _bossFlashCo = null;
+            RestoreBossPersistent();
+        }
+
+        /// <summary>플래시 종료/틴트 변경 시 지속 상태 반영: 그로기면 파르스름, 아니면 MPB 제거(카운터 발광 등 머티리얼 값 노출).</summary>
+        private void RestoreBossPersistent()
+        {
+            if (bodyRenderers == null) return;
+            if (_grogTintActive)
+            {
+                SetBossEmission(groggyTint * 0.9f);
+            }
+            else
+            {
+                foreach (var r in bodyRenderers)
+                    if (r != null) r.SetPropertyBlock(null);   // MPB 이미시브 override 제거
+            }
+        }
+
+        private void SetBossEmission(Color emission)
+        {
+            foreach (var r in bodyRenderers)
+            {
+                if (r == null) continue;
+                r.GetPropertyBlock(_bossMpb);
+                _bossMpb.SetColor(EmissionId, emission);
+                r.SetPropertyBlock(_bossMpb);
+            }
+        }
+
+        /// <summary>MPB 이미시브가 보이도록 본체 머티리얼(이미 인스턴스)에 _EMISSION 키워드 1회 활성.</summary>
+        private void EnsureBossEmission()
+        {
+            if (_bossEmissionReady || bodyRenderers == null) return;
+            _bossEmissionReady = true;
+            foreach (var r in bodyRenderers)
+            {
+                if (r == null) continue;
+                var m = r.material;
+                if (m != null && m.HasProperty(EmissionId)) m.EnableKeyword("_EMISSION");
             }
         }
 

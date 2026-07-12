@@ -358,6 +358,7 @@ class RaidEnv:
             RaidActionID.COUNTER: role == PartyRole.DEALER,
             RaidActionID.SKILL_2: role == PartyRole.DEALER,
             RaidActionID.DASH: role == PartyRole.DEALER,
+            RaidActionID.ULTIMATE: role == PartyRole.DEALER,
         }
         if not allowed.get(a, False):
             self.step_events[u.uid].append({"type": "invalid_action"})
@@ -425,6 +426,15 @@ class RaidEnv:
         elif a == RaidActionID.DASH:
             u.cooldowns[int(a)] = cd
             self._do_dash(u)
+        elif a == RaidActionID.ULTIMATE:
+            u.cooldowns[int(a)] = cd
+            # R 궁극기 '혈월 처형' — 초대형 지면 조준 AoE (딜러 전용). 크리 판정 적용.
+            # 스태거 활성 중이면 ult_stagger_contrib(대량) 만큼 무력화 게이지 차감.
+            self._do_aim_skill(u, "ult",
+                               self.config.aim_ult_radius,
+                               self.config.aim_ult_range,
+                               self.config.aim_ult_damage,
+                               stagger_contrib=self.config.ult_stagger_contrib)
 
     # ────────────── 액션 효과 ──────────────
     def _do_attack(self, u: PartyUnit, skill: bool):
@@ -448,7 +458,7 @@ class RaidEnv:
 
     def _do_aim_skill(self, u: PartyUnit, skill_key: str,
                       radius: float, max_range: float, damage: int,
-                      is_skill: bool = True):
+                      is_skill: bool = True, stagger_contrib: Optional[float] = None):
         """딜러 지면 지정 AoE (로아식 설치기). 즉시 발동 — 텔레그래프 없음.
 
         - 조준점: step() 의 aim_points["p<uid>"] (sim 좌표). 없으면 보스 위치 자동 조준.
@@ -456,6 +466,8 @@ class RaidEnv:
         - AoE 원 안에 보스(몸통 원 겹침) 있으면 피해. 파티원 프렌들리파이어 없음.
         - 이벤트: player_skill_cast (Unity 폭발 VFX + 명중 표시용). skill 필드로 Q/W/평타 구분.
         - is_skill: Q/W(True) vs 평타(False) — damage 이벤트 skill 플래그·스태거 기여량 구분.
+        - stagger_contrib: None 이 아니면 스태거 게이지 기여량을 이 값으로 강제(궁극기 대량 기여).
+          None 이면 is_skill 기준(skill/basic) 기본 기여량 사용.
         """
         aim = self._aim_points.get(f"p{u.uid}")
         if aim is None:
@@ -488,8 +500,11 @@ class RaidEnv:
             if actual > 0:
                 self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": is_skill, "crit": crit})
             if self.boss.stagger_active:
-                contrib = (self.config.stagger_contrib_skill if is_skill
-                           else self.config.stagger_contrib_basic)
+                if stagger_contrib is not None:
+                    contrib = stagger_contrib
+                else:
+                    contrib = (self.config.stagger_contrib_skill if is_skill
+                               else self.config.stagger_contrib_basic)
                 self.boss.stagger_gauge -= contrib
                 self.step_events[u.uid].append({"type": "stagger_contribute",
                                                 "amount": contrib})

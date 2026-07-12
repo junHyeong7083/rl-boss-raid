@@ -76,6 +76,7 @@ class RaidActionID(IntEnum):
     COUNTER = 17            # 딜러 E 저지 액션
     SKILL_2 = 18            # 딜러 W 혈월 낙하 (대형 조준 AoE, 딜러 전용)
     DASH = 19              # 딜러 회피 기동기 — 조준 방향으로 dash_distance 즉시 이동
+    ULTIMATE = 20          # 딜러 R 궁극기 '혈월 처형' (초대형 조준 AoE, 딜러 전용)
 
 
 # 별칭 (boss_streamer 계열 재사용 호환 — BossActionID 이름도 노출)
@@ -170,7 +171,7 @@ class RaidConfig:
     #   Self(16) + Allies(24) + Boss(12) + PatternCh(10x4=40) + Danger(8)
     #   + Escape(4) + Coop(8) + Pillars(12) + Player(4) = 128
     obs_size: int = 128
-    num_actions: int = 20
+    num_actions: int = 21
 
     # ── 대시(회피 기동기, 딜러) ──
     # 조준 방향(aim_points)으로 dash_distance 즉시 이동. aim 없으면 이동 방향/보스 반대 방향 폴백.
@@ -188,6 +189,7 @@ class RaidConfig:
         int(RaidActionID.SKILL_2): 40,       # 딜러 W 혈월 낙하 (40턴=12.0s)
         int(RaidActionID.COUNTER): 25,       # 딜러 E 저지 (25턴=7.5s)
         int(RaidActionID.DASH): 17,          # 딜러 대시 회피 (17턴=5.1s)
+        int(RaidActionID.ULTIMATE): 200,     # 딜러 R 궁극 '혈월 처형' (200턴=60.0s)
         int(RaidActionID.TAUNT): 6,          # (6턴=1.8s)
         int(RaidActionID.GUARD): 4,          # (4턴=1.2s)
         int(RaidActionID.HEAL): 4,           # (4턴=1.2s)
@@ -205,6 +207,12 @@ class RaidConfig:
     aim_w_radius: float = 3.0
     aim_w_range: float = 9.0
     aim_w_damage: int = 110
+    # R 궁극기 '혈월 처형' (ULTIMATE) — 초대형 조준 AoE, 딜러 전용, 크리 판정 적용.
+    # 무력화(스태거) 활성 중이면 대량 게이지 기여(ult_stagger_contrib).
+    aim_ult_radius: float = 4.0
+    aim_ult_range: float = 9.0
+    aim_ult_damage: int = 400
+    ult_stagger_contrib: float = 60.0
     # 평타 (딜러 ATTACK_BASIC) — 롤 논스마트키식 지면 조준 설치기.
     # 쿨 없음, 데미지는 유닛 attack 그대로(별도 상수 없음). Q/W보다 작은 반경/짧은 사거리.
     aim_basic_radius: float = 1.2
@@ -348,6 +356,7 @@ SKILL_KEYS: Dict[int, str] = {
     int(RaidActionID.SKILL_2): "skill2",         # 딜러 W
     int(RaidActionID.COUNTER): "counter",        # 딜러 E
     int(RaidActionID.DASH): "dash",              # 딜러 대시 (회피 기동기)
+    int(RaidActionID.ULTIMATE): "ult",           # 딜러 R 궁극 '혈월 처형'
     int(RaidActionID.TAUNT): "taunt",
     int(RaidActionID.GUARD): "guard",
     int(RaidActionID.HEAL): "heal",
@@ -369,7 +378,8 @@ ROLE_SKILLS: Dict[PartyRole, Tuple[int, int]] = {
 # 딜러는 {"skill": Q, "skill2": W, "counter": E} 3키.
 SKILL_BAR: Dict[PartyRole, Tuple[int, ...]] = {
     PartyRole.DEALER:  (int(RaidActionID.ATTACK_SKILL), int(RaidActionID.SKILL_2),
-                        int(RaidActionID.COUNTER), int(RaidActionID.DASH)),
+                        int(RaidActionID.COUNTER), int(RaidActionID.DASH),
+                        int(RaidActionID.ULTIMATE)),
     PartyRole.TANK:    (int(RaidActionID.TAUNT), int(RaidActionID.GUARD)),
     PartyRole.HEALER:  (int(RaidActionID.HEAL), int(RaidActionID.CLEANSE)),
     PartyRole.SUPPORT: (int(RaidActionID.BUFF_ATK), int(RaidActionID.BUFF_SHIELD)),

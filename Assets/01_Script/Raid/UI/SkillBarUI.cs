@@ -41,6 +41,7 @@ namespace BossRaid
             new SkillSlotDef { label = "혈창",   keyLabel = "Q",     cooldownKey = "skill",   maxCooldown = 20 },
             new SkillSlotDef { label = "혈월",   keyLabel = "W",     cooldownKey = "skill2",  maxCooldown = 40 },
             new SkillSlotDef { label = "카운터", keyLabel = "E",     cooldownKey = "counter", maxCooldown = 25 },
+            new SkillSlotDef { label = "혈월처형", keyLabel = "R",   cooldownKey = "ult",     maxCooldown = 200 },
             new SkillSlotDef { label = "대시",   keyLabel = "Shift", cooldownKey = "dash",    maxCooldown = 17 },
             new SkillSlotDef { label = "평타",   keyLabel = "Space", cooldownKey = "",        maxCooldown = 0 },
         };
