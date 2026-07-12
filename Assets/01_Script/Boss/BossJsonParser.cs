@@ -73,8 +73,11 @@ namespace BossRaid
                     ty = GetFloat(d, "ty"),
                     radius = GetFloat(d, "radius"),
                     hit = GetBool(d, "hit"),
-                    // counter_miss 사유 ("angle"|"range"). 없으면 null.
+                    // counter_miss/parry_fail 사유. 없으면 null.
                     reason = GetString(d, "reason"),
+                    // pillar_explode 위치 (sim 좌표). 없으면 0.
+                    x = GetFloat(d, "x"),
+                    y = GetFloat(d, "y"),
                 };
             }
             return arr;
@@ -106,6 +109,9 @@ namespace BossRaid
                 // ── 돌진 표식 (없으면 비활성) ──
                 rush_target = GetIntOrDefault(d, "rush_target", -1),
                 rush_left = GetInt(d, "rush_left"),
+                // ── 원형 아레나 / 무력화 게이지 (없으면 0) ──
+                arena_radius = GetFloat(d, "arena_radius"),
+                stagger_max = GetInt(d, "stagger_max"),
             };
         }
 

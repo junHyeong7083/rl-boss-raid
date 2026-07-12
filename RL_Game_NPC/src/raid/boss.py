@@ -83,9 +83,13 @@ class Boss:
     grog_turns: int = 0
     stun_turns: int = 0
 
-    # 스태거 (기둥 들어올리기)
+    # 스태거 (상시 게이지 신시스템)
+    #   stagger_gauge: stagger_max 에서 시작, 스킬 명중마다 감소. 0 도달 → 파괴(그로기).
+    #   stagger_active: 이제 "무력화 파괴 그로기(딜타임) 중 여부" 로 재정의(True=딜타임).
+    #   stagger_break_turns: 파괴 그로기 잔여 턴(stagger_active 유지용).
     stagger_active: bool = False
     stagger_gauge: float = 0.0
+    stagger_break_turns: int = 0
 
     # 카운터 창
     counter_window_turns: int = 0
@@ -103,6 +107,8 @@ class Boss:
         self.x = self.config.map_width / 2.0
         self.y = self.config.map_height / 2.0
         self.facing = self.config.boss_start_facing
+        # 상시 스태거 게이지: 최대치에서 시작
+        self.stagger_gauge = self.config.stagger_max
 
     # ── boss_streamer 호환: telegraphs 목록 ──
     @property
@@ -150,7 +156,8 @@ class Boss:
             self.invuln_turns = self.config.phase_transition_invuln_turns
             self.active_pattern = None
             self.stagger_active = False
-            self.stagger_gauge = 0.0
+            self.stagger_break_turns = 0
+            self.stagger_gauge = self.config.stagger_max   # 페이즈 전환 시 게이지 리셋
             self.counter_window_turns = 0
             return True
         return False
@@ -297,6 +304,26 @@ class Boss:
         self.add_aggro(attacker_uid, actual * self.config.aggro_damage_weight)
         return actual
 
+    # ── 상시 스태거 게이지 ──
+    def reduce_stagger(self, amount: float) -> Tuple[float, bool]:
+        """스킬 명중 스태거 감소. (적용량, 파괴여부) 반환.
+
+        무력화 게이지는 stagger_max 에서 시작해 감소하고, 0 도달 시 파괴:
+        보스 그로기(stagger_break_grog_turns) + 게이지 max 리셋. 그로기/무적/파괴딜타임
+        중엔 감소하지 않는다(적용량 0).
+        """
+        if amount <= 0 or self.is_incapacitated() or self.stagger_active:
+            return 0.0, False
+        self.stagger_gauge -= amount
+        if self.stagger_gauge <= 0.0:
+            self.stagger_gauge = self.config.stagger_max
+            g = self.config.stagger_break_grog_turns
+            self.grog_turns = max(self.grog_turns, g)
+            self.stagger_active = True
+            self.stagger_break_turns = g
+            return amount, True
+        return amount, False
+
     def tick_end_of_turn(self):
         if self.invuln_turns > 0:
             self.invuln_turns -= 1
@@ -304,5 +331,9 @@ class Boss:
             self.grog_turns -= 1
         if self.stun_turns > 0:
             self.stun_turns -= 1
+        if self.stagger_break_turns > 0:
+            self.stagger_break_turns -= 1
+            if self.stagger_break_turns <= 0:
+                self.stagger_active = False
         self.decay_aggro()
         self.tick_cooldowns()

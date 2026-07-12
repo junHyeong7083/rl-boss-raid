@@ -43,12 +43,14 @@ class PartyUnit:
     attack_range: float
     move_speed: float
     radius: float
+    facing: float = 0.0          # 라디안 — 이동/대시/조준 공격 방향으로 갱신 (카운터/패링 조건)
     alive: bool = True
     cooldowns: Dict[int, int] = field(default_factory=dict)
     buff_atk: int = 0
     buff_shield: int = 0
     buff_guard: int = 0
     marked_turns: int = 0
+    parry_turns: int = 0         # PARRY 무장 잔여 턴(발동 임팩트까지 유지)
     total_damage_dealt: int = 0
     total_damage_taken: int = 0
     total_heal_done: int = 0
@@ -82,9 +84,14 @@ class RaidEnv:
         self._prev_unit_positions: Dict[int, Tuple[float, float]] = {}
         self._prev_boss_pos: Tuple[float, float] = (0.0, 0.0)
         self._counter_success = False
+        self._counter_uid: Optional[int] = None
         self._aim_points: Dict[str, Tuple[float, float]] = {}
         # 패턴 종료 후 강제 휴식 카운터(실시간 페이싱). >0 이면 신규 패턴 시전 보류.
         self._pattern_gap_remaining = 0
+        # 원형 아레나 유효 반경(HP 티어 연동, 축소 진행 상태).
+        self.arena_radius: float = self.config.arena_radius_tiers[0]
+        self._arena_target: float = self.config.arena_radius_tiers[0]
+        self._arena_shrink_step: float = 0.0
 
         self.reset()
 
@@ -123,11 +130,17 @@ class RaidEnv:
         self.victory = False
         self.step_events.clear()
         self._counter_success = False
+        self._counter_uid = None
         self._pattern_gap_remaining = 0
         self.units.clear()
+        # 아레나 초기화(티어0 반경)
+        self.arena_radius = cfg.arena_radius_tiers[0]
+        self._arena_target = cfg.arena_radius_tiers[0]
+        self._arena_shrink_step = 0.0
 
         # 기둥 (고정 4개)
         self.pillars = [Pillar(px, py, cfg.pillar_radius) for (px, py) in cfg.pillar_positions]
+        self._reposition_pillars_inside_arena()
 
         # 배치
         margin = 3.0
@@ -142,6 +155,7 @@ class RaidEnv:
             st = ROLE_STATS[role]
             sx = min(max(cx + self.rng.uniform(-1.0, 1.0), st.radius), cfg.map_width - st.radius)
             sy = min(max(cy + self.rng.uniform(-1.0, 1.0), st.radius), cfg.map_height - st.radius)
+            sx, sy = self._clamp_arena(sx, sy, st.radius)   # 원형 아레나 안으로
             self.units[i] = PartyUnit(
                 uid=i, role=role, x=sx, y=sy, hp=st.hp, mp=st.mp,
                 max_hp=st.hp, max_mp=st.mp, attack=st.attack, defense=st.defense,
@@ -149,8 +163,9 @@ class RaidEnv:
             )
 
         self.boss = Boss(config=cfg, rng=self.rng)
-        self.boss.x = boss_x
-        self.boss.y = boss_y
+        bx, by = self._clamp_arena(boss_x, boss_y, cfg.boss_radius)
+        self.boss.x = bx
+        self.boss.y = by
         self.boss.hp = cfg.boss_max_hp
         for u in self.units.values():
             self.boss.aggro[u.uid] = self.rng.uniform(0, 5)
@@ -171,6 +186,7 @@ class RaidEnv:
         self.step_events = {uid: [] for uid in self.units}
         self.current_step += 1
         self._counter_success = False
+        self._counter_uid = None
         # 이번 턴 시작 시 패턴 진행 여부 (종료 감지용 — 패턴 간 휴식 gap 트리거).
         had_pattern = self.boss.active_pattern is not None
 
@@ -221,12 +237,18 @@ class RaidEnv:
                 t = self.units[top]
                 self._move_boss_toward(t.x, t.y)
 
-        # 6. 기둥 재생성 틱
+        # 6. 기둥 재생성 틱 (전멸기 중엔 재생성 동결 — 순차 폭발 기믹 보존)
+        seal_active_now = (self.boss.active_pattern is not None
+                           and self.boss.active_pattern.mode == "seal")
         for p in self.pillars:
-            if not p.alive:
+            if not p.alive and not seal_active_now:
                 p.respawn_timer -= 1
                 if p.respawn_timer <= 0:
                     p.alive = True
+                    self._reposition_pillars_inside_arena()
+
+        # 6.5. 아레나 HP 연동 축소 (전멸기 중 보류는 _update_arena 내부에서 처리)
+        self._update_arena()
 
         # 7. 버프/쿨다운 틱
         for u in self.units.values():
@@ -234,6 +256,7 @@ class RaidEnv:
             if u.buff_shield > 0: u.buff_shield -= 1
             if u.buff_guard > 0: u.buff_guard -= 1
             if u.marked_turns > 0: u.marked_turns -= 1
+            if u.parry_turns > 0: u.parry_turns -= 1
             for k in list(u.cooldowns.keys()):
                 u.cooldowns[k] = max(0, u.cooldowns[k] - 1)
 
@@ -282,18 +305,19 @@ class RaidEnv:
             if dx == 0 and dy == 0:
                 continue
             u = self.units[uid]
-            nx = min(max(u.x + dx, u.radius), self.config.map_width - u.radius)
-            ny = min(max(u.y + dy, u.radius), self.config.map_height - u.radius)
+            # 이동 의도 방향으로 facing 갱신 (슬라이딩 여부와 무관 — 카운터/패링 조건용)
+            u.facing = math.atan2(dy, dx)
+            nx, ny = self._clamp_arena(u.x + dx, u.y + dy, u.radius)
             if not self._blocked_for_unit(uid, nx, ny):
                 u.x, u.y = nx, ny
                 continue
             # 충돌 슬라이딩: 대각/직선 이동이 장애물(보스/기둥)에 막히면 축 성분으로
             # 분해해 미끄러진다. (없으면 기둥 뒤 은신 등에서 벽에 붙어 영구 제자리걸음)
-            sx = min(max(u.x + dx, u.radius), self.config.map_width - u.radius)
+            sx, _sy0 = self._clamp_arena(u.x + dx, u.y, u.radius)
             if dx != 0 and not self._blocked_for_unit(uid, sx, u.y):
                 u.x = sx
                 continue
-            sy = min(max(u.y + dy, u.radius), self.config.map_height - u.radius)
+            _sx0, sy = self._clamp_arena(u.x, u.y + dy, u.radius)
             if dy != 0 and not self._blocked_for_unit(uid, u.x, sy):
                 u.y = sy
         # 비이동
@@ -359,6 +383,7 @@ class RaidEnv:
             RaidActionID.SKILL_2: role == PartyRole.DEALER,
             RaidActionID.DASH: role == PartyRole.DEALER,
             RaidActionID.ULTIMATE: role == PartyRole.DEALER,
+            RaidActionID.PARRY: role == PartyRole.DEALER,
         }
         if not allowed.get(a, False):
             self.step_events[u.uid].append({"type": "invalid_action"})
@@ -371,12 +396,9 @@ class RaidEnv:
 
         if a == RaidActionID.ATTACK_BASIC:
             if role == PartyRole.DEALER:
-                # 딜러 평타 = 롤 논스마트키식 지면 조준 설치기 (쿨 없음, 데미지=유닛 attack).
-                # Q/W 와 동일한 지면 조준 AoE 경로. aim 없으면(NPC 딜러/FSM) 보스 자동 조준.
-                self._do_aim_skill(u, "basic",
-                                   self.config.aim_basic_radius,
-                                   self.config.aim_basic_range,
-                                   u.attack, is_skill=False)
+                # 딜러 평타 = 롤 제리 Q 식 "방향 라인 스킬샷" (쿨 없음, 데미지=유닛 attack).
+                # aim 은 방향 지시점으로만 사용. aim 없으면(NPC 딜러/FSM) 보스 방향 자동 조준.
+                self._do_basic_lineshot(u)
             else:
                 # 탱커/힐러/서포터 평타 = 기존 근접 로직 유지 (FSM NPC 호환).
                 self._do_attack(u, skill=False)
@@ -387,7 +409,8 @@ class RaidEnv:
                 self._do_aim_skill(u, "skill",
                                    self.config.aim_q_radius,
                                    self.config.aim_q_range,
-                                   self.config.aim_q_damage)
+                                   self.config.aim_q_damage,
+                                   stagger_action=int(RaidActionID.ATTACK_SKILL))
             else:
                 self._do_attack(u, skill=True)
         elif a == RaidActionID.SKILL_2:
@@ -396,14 +419,11 @@ class RaidEnv:
             self._do_aim_skill(u, "skill2",
                                self.config.aim_w_radius,
                                self.config.aim_w_range,
-                               self.config.aim_w_damage)
+                               self.config.aim_w_damage,
+                               stagger_action=int(RaidActionID.SKILL_2))
         elif a == RaidActionID.TAUNT:
             u.cooldowns[int(a)] = cd
             self.boss.add_aggro(u.uid, self.config.aggro_taunt_bonus)
-            if self.boss.stagger_active:
-                self.boss.stagger_gauge -= self.config.stagger_contrib_taunt
-                self.step_events[u.uid].append({"type": "stagger_contribute",
-                                                "amount": self.config.stagger_contrib_taunt})
             self.step_events[u.uid].append({"type": "taunt"})
         elif a == RaidActionID.GUARD:
             u.cooldowns[int(a)] = cd
@@ -429,12 +449,15 @@ class RaidEnv:
         elif a == RaidActionID.ULTIMATE:
             u.cooldowns[int(a)] = cd
             # R 궁극기 '혈월 처형' — 초대형 지면 조준 AoE (딜러 전용). 크리 판정 적용.
-            # 스태거 활성 중이면 ult_stagger_contrib(대량) 만큼 무력화 게이지 차감.
+            # 명중 시 상시 스태거 게이지 대량(ULTIMATE=80) 차감.
             self._do_aim_skill(u, "ult",
                                self.config.aim_ult_radius,
                                self.config.aim_ult_range,
                                self.config.aim_ult_damage,
-                               stagger_contrib=self.config.ult_stagger_contrib)
+                               stagger_action=int(RaidActionID.ULTIMATE))
+        elif a == RaidActionID.PARRY:
+            # 패링(딜러 G) — 쿨다운은 _try_parry 내부에서 결정(무장=풀, 미달=절반).
+            self._try_parry(u, cd)
 
     # ────────────── 액션 효과 ──────────────
     def _do_attack(self, u: PartyUnit, skill: bool):
@@ -451,23 +474,76 @@ class RaidEnv:
         actual = self.boss.take_damage(dmg, u.uid)
         u.total_damage_dealt += actual
         self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": skill, "crit": crit})
-        if self.boss.stagger_active:
-            contrib = (self.config.stagger_contrib_skill if skill else self.config.stagger_contrib_basic)
-            self.boss.stagger_gauge -= contrib
-            self.step_events[u.uid].append({"type": "stagger_contribute", "amount": contrib})
+        self._apply_stagger(u, int(RaidActionID.ATTACK_SKILL if skill else RaidActionID.ATTACK_BASIC))
+
+    def _apply_stagger(self, u: PartyUnit, action_id: int):
+        """상시 스태거 게이지 감소 적용. 명중한 유닛에 stagger_contribute, 파괴 시 전원 stagger_break."""
+        amt = self.config.stagger_values.get(int(action_id), 0.0)
+        if amt <= 0:
+            return
+        applied, broke = self.boss.reduce_stagger(amt)
+        if applied > 0:
+            self.step_events[u.uid].append({"type": "stagger_contribute", "amount": float(applied)})
+        if broke:
+            for uid in self.units:
+                self.step_events[uid].append({"type": "stagger_break"})
+
+    def _do_basic_lineshot(self, u: PartyUnit):
+        """딜러 평타 = 방향 라인 스킬샷 (롤 제리 Q). 즉시 발동.
+
+        aim_points(tx,ty)는 방향 지시점으로만 사용 — 플레이어 위치에서 그 방향으로
+        고정 길이 aim_basic_range, 반폭 aim_basic_halfwidth 라인. 보스 원과 교차 시 명중.
+        aim 없으면 보스 방향 자동 조준. player_skill_cast(skill="basic") 방출 —
+        tx/ty = 라인 끝점 월드좌표(Unity 트레이서 렌더).
+        """
+        cfg = self.config
+        aim = self._aim_points.get(f"p{u.uid}")
+        if aim is None:
+            dx = self.boss.x - u.x; dy = self.boss.y - u.y
+        else:
+            dx = float(aim[0]) - u.x; dy = float(aim[1]) - u.y
+        d = math.hypot(dx, dy)
+        if d < 1e-6:
+            dx, dy, d = math.cos(u.facing), math.sin(u.facing), 1.0
+        ux, uy = dx / d, dy / d
+        u.facing = math.atan2(uy, ux)   # 조준 공격 방향으로 facing 갱신
+        ex = u.x + ux * cfg.aim_basic_range
+        ey = u.y + uy * cfg.aim_basic_range
+        hw = cfg.aim_basic_halfwidth
+        hit = _point_in_line_segment((self.boss.x, self.boss.y), (u.x, u.y), (ex, ey),
+                                     hw + cfg.boss_radius)
+        actual = 0
+        crit = False
+        if hit:
+            dmg = u.attack
+            if u.buff_atk > 0:
+                dmg = int(dmg * 1.3)
+            crit = self.rng.random() < cfg.crit_chance
+            if crit:
+                dmg = int(round(dmg * cfg.crit_multiplier))
+            actual = self.boss.take_damage(dmg, u.uid)
+            u.total_damage_dealt += actual
+            if actual > 0:
+                self.step_events[u.uid].append({"type": "damage", "amount": actual,
+                                                "skill": False, "crit": crit})
+            self._apply_stagger(u, int(RaidActionID.ATTACK_BASIC))
+        self.step_events[u.uid].append({
+            "type": "player_skill_cast", "skill": "basic",
+            "tx": float(ex), "ty": float(ey), "radius": float(hw),
+            "hit": bool(hit), "amount": int(actual), "crit": bool(crit),
+        })
 
     def _do_aim_skill(self, u: PartyUnit, skill_key: str,
                       radius: float, max_range: float, damage: int,
-                      is_skill: bool = True, stagger_contrib: Optional[float] = None):
+                      is_skill: bool = True, stagger_action: Optional[int] = None):
         """딜러 지면 지정 AoE (로아식 설치기). 즉시 발동 — 텔레그래프 없음.
 
         - 조준점: step() 의 aim_points["p<uid>"] (sim 좌표). 없으면 보스 위치 자동 조준.
         - 사거리 밖 조준점은 사거리 경계로 클램프.
         - AoE 원 안에 보스(몸통 원 겹침) 있으면 피해. 파티원 프렌들리파이어 없음.
         - 이벤트: player_skill_cast (Unity 폭발 VFX + 명중 표시용). skill 필드로 Q/W/평타 구분.
-        - is_skill: Q/W(True) vs 평타(False) — damage 이벤트 skill 플래그·스태거 기여량 구분.
-        - stagger_contrib: None 이 아니면 스태거 게이지 기여량을 이 값으로 강제(궁극기 대량 기여).
-          None 이면 is_skill 기준(skill/basic) 기본 기여량 사용.
+        - is_skill: Q/W(True) vs 평타(False) — damage 이벤트 skill 플래그 구분.
+        - stagger_action: 명중 시 상시 스태거 게이지에서 stagger_values[action] 만큼 차감(액션별).
         """
         aim = self._aim_points.get(f"p{u.uid}")
         if aim is None:
@@ -483,6 +559,10 @@ class RaidEnv:
         # 맵 경계 클램프
         tx = min(max(tx, 0.0), self.config.map_width)
         ty = min(max(ty, 0.0), self.config.map_height)
+        # 조준 공격 방향으로 facing 갱신
+        fdx = tx - u.x; fdy = ty - u.y
+        if abs(fdx) > 1e-6 or abs(fdy) > 1e-6:
+            u.facing = math.atan2(fdy, fdx)
 
         hit = math.hypot(tx - self.boss.x, ty - self.boss.y) <= radius + self.config.boss_radius
         actual = 0
@@ -499,15 +579,8 @@ class RaidEnv:
             u.total_damage_dealt += actual
             if actual > 0:
                 self.step_events[u.uid].append({"type": "damage", "amount": actual, "skill": is_skill, "crit": crit})
-            if self.boss.stagger_active:
-                if stagger_contrib is not None:
-                    contrib = stagger_contrib
-                else:
-                    contrib = (self.config.stagger_contrib_skill if is_skill
-                               else self.config.stagger_contrib_basic)
-                self.boss.stagger_gauge -= contrib
-                self.step_events[u.uid].append({"type": "stagger_contribute",
-                                                "amount": contrib})
+            if stagger_action is not None:
+                self._apply_stagger(u, stagger_action)
         self.step_events[u.uid].append({
             "type": "player_skill_cast", "skill": skill_key,
             "tx": float(tx), "ty": float(ty), "radius": float(radius),
@@ -548,10 +621,16 @@ class RaidEnv:
             target.buff_shield = 3
         self.step_events[u.uid].append({"type": "buff", "target": target.uid, "kind": kind})
 
-    def _try_counter(self, u: PartyUnit, cd: int):
-        """딜러 저지: 카운터 창 중 보스 전방 근접에서 성공.
+    def _faces_boss(self, u: PartyUnit, max_deg: float) -> bool:
+        """유닛 facing 이 보스 방향과 max_deg 이내인지 (조준 공격/이동으로 갱신된 facing 기준)."""
+        face_ang = math.atan2(self.boss.y - u.y, self.boss.x - u.x)
+        fdiff = abs((u.facing - face_ang + math.pi) % (2 * math.pi) - math.pi)
+        return fdiff <= math.radians(max_deg)
 
-        각도/거리 조건 밖 시도는 무시하지 않고 counter_miss(reason=angle|range) 이벤트를
+    def _try_counter(self, u: PartyUnit, cd: int):
+        """딜러 저지: 카운터 창 중 보스 전방 근접 + 보스를 바라볼 때 성공.
+
+        조건 밖 시도는 무시하지 않고 counter_miss(reason=range|facing|angle) 이벤트를
         방출하고 쿨다운을 절반만 적용(재시도 여지). 성공 시 풀 쿨다운.
         """
         cfg = self.config
@@ -561,20 +640,79 @@ class RaidEnv:
             u.cooldowns[int(RaidActionID.COUNTER)] = half_cd
             self.step_events[u.uid].append({"type": "counter_whiff"})
             return
-        # 전방/거리 판정
+        # 전방/거리/바라봄 판정
         ang_to_boss = math.atan2(u.y - self.boss.y, u.x - self.boss.x)
         diff = abs((ang_to_boss - self.boss.facing + math.pi) % (2 * math.pi) - math.pi)
         in_front = diff <= math.radians(cfg.counter_front_angle_deg) * 0.5
         in_range = self._boss_dist(u.x, u.y) <= cfg.counter_range
-        if in_front and in_range:
+        faces = self._faces_boss(u, cfg.counter_facing_angle_deg)
+        if in_front and in_range and faces:
             u.cooldowns[int(RaidActionID.COUNTER)] = cd
             self._counter_success = True
+            self._counter_uid = u.uid
             self.step_events[u.uid].append({"type": "counter_hit"})
         else:
-            reason = "range" if not in_range else "angle"
+            if not in_range:
+                reason = "range"
+            elif not faces:
+                reason = "facing"
+            else:
+                reason = "angle"
             u.cooldowns[int(RaidActionID.COUNTER)] = half_cd
             self.step_events[u.uid].append({"type": "counter_miss",
                                             "uid": int(u.uid), "reason": reason})
+
+    def _try_parry(self, u: PartyUnit, cd: int):
+        """딜러 패링(G): YELLOW_BURST(노란 확산 원) 마지막 창에서 원 안 + 보스 바라볼 때 무장.
+
+        - 유효 무장: 활성 YELLOW_BURST 가 있고 turns_remaining ≤ parry_window_turns 이며 원 안이고
+          보스를 바라봄(≤ parry_facing_angle_deg). 성공 시 풀 쿨 + parry_turns 무장(임팩트에서 무효 판정).
+        - 창 밖/원 밖/타이밍 미달 → parry_fail reason="timing", 쿨 절반.
+        - 창 안·원 안이나 미조준 → parry_fail reason="facing", 쿨 절반.
+        - 실제 대미지 무효/그로기/스태거는 _impact_parry 에서 발동 시 확정.
+        """
+        cfg = self.config
+        half_cd = max(1, int(cd * cfg.parry_fail_cooldown_scale))
+        ap = self.boss.active_pattern
+        valid_window = (ap is not None and ap.mode == "steps"
+                        and int(ap.pattern_id) == int(PatternID.YELLOW_BURST)
+                        and ap.turns_remaining <= cfg.parry_window_turns
+                        and ap.contains((u.x, u.y)))
+        if not valid_window:
+            u.cooldowns[int(RaidActionID.PARRY)] = half_cd
+            self.step_events[u.uid].append({"type": "parry_fail", "uid": int(u.uid),
+                                            "reason": "timing"})
+            return
+        if not self._faces_boss(u, cfg.parry_facing_angle_deg):
+            u.cooldowns[int(RaidActionID.PARRY)] = half_cd
+            self.step_events[u.uid].append({"type": "parry_fail", "uid": int(u.uid),
+                                            "reason": "facing"})
+            return
+        # 무장 성공 — 임팩트까지 유지 (parry_window_turns + 1 턴)
+        u.cooldowns[int(RaidActionID.PARRY)] = cd
+        u.parry_turns = cfg.parry_window_turns + 1
+
+    def _impact_parry(self, ap: ActivePattern, step: PatternStep):
+        """YELLOW_BURST 발동: 원 안 유닛에 parry_damage. 무장한 딜러는 무효 + 그로기 + 스태거."""
+        cfg = self.config
+        shp = ap.world_shapes[0] if ap.world_shapes else None
+        for u in self.units.values():
+            if not u.alive:
+                continue
+            if shp is None or not shp.contains((u.x, u.y)):
+                continue
+            if u.role == PartyRole.DEALER and u.parry_turns > 0:
+                u.parry_turns = 0
+                # 스태거(패링 성공)를 그로기 세팅 전에 적용(그로기 중엔 게이지 감소 없음)
+                self._apply_stagger(u, int(RaidActionID.PARRY))
+                self.boss.grog_turns = max(self.boss.grog_turns, cfg.parry_success_grog_turns)
+                for uid in self.units:
+                    self.step_events[uid].append({"type": "parry_success", "uid": int(u.uid)})
+            else:
+                self._deal_damage_to_unit(u, step.damage)
+        # 남은 무장 소거(중복 방지)
+        for u in self.units.values():
+            u.parry_turns = 0
 
     def _do_dash(self, u: PartyUnit):
         """딜러 회피 기동기 — 조준 방향으로 dash_distance 즉시 이동.
@@ -600,12 +738,12 @@ class RaidEnv:
         if d < 1e-6:
             dx, dy, d = 1.0, 0.0, 1.0
         ux, uy = dx / d, dy / d
+        u.facing = math.atan2(uy, ux)   # 대시 방향으로 facing 갱신
         remaining = cfg.dash_distance
         substep = 0.5
         while remaining > 1e-6:
             s = min(substep, remaining)
-            nx = min(max(u.x + ux * s, u.radius), cfg.map_width - u.radius)
-            ny = min(max(u.y + uy * s, u.radius), cfg.map_height - u.radius)
+            nx, ny = self._clamp_arena(u.x + ux * s, u.y + uy * s, u.radius)
             if (nx == u.x and ny == u.y) or self._blocked_for_unit(u.uid, nx, ny):
                 break
             u.x, u.y = nx, ny
@@ -614,6 +752,65 @@ class RaidEnv:
             "type": "dash", "uid": int(u.uid),
             "tx": float(u.x), "ty": float(u.y),
         })
+
+    # ────────────── 원형 아레나 ──────────────
+    def _in_arena(self, x: float, y: float, radius: float) -> bool:
+        cx, cy = self.config.arena_center
+        return math.hypot(x - cx, y - cy) <= (self.arena_radius - radius) + 1e-9
+
+    def _clamp_arena(self, x: float, y: float, radius: float) -> Tuple[float, float]:
+        """원형 경계(반경 - radius) 안으로 클램프. 밖이면 경계 위로 당김."""
+        cx, cy = self.config.arena_center
+        dx = x - cx; dy = y - cy
+        d = math.hypot(dx, dy)
+        maxd = max(0.0, self.arena_radius - radius)
+        if d > maxd and d > 1e-9:
+            return cx + dx / d * maxd, cy + dy / d * maxd
+        return x, y
+
+    def _push_units_inside(self):
+        for u in self.units.values():
+            if u.alive:
+                u.x, u.y = self._clamp_arena(u.x, u.y, u.radius)
+        self.boss.x, self.boss.y = self._clamp_arena(self.boss.x, self.boss.y,
+                                                     self.config.boss_radius)
+
+    def _reposition_pillars_inside_arena(self):
+        """기둥이 (유효반경 - pillar_inner_margin) 밖이면 중심 쪽으로 비율 이동 —
+        기둥 뒤 은신 지점이 경계 안이 되도록."""
+        cx, cy = self.config.arena_center
+        maxd = self.arena_radius - self.config.pillar_inner_margin
+        for p in self.pillars:
+            dx = p.x - cx; dy = p.y - cy
+            d = math.hypot(dx, dy)
+            if d > maxd and d > 1e-9:
+                p.x = cx + dx / d * maxd
+                p.y = cy + dy / d * maxd
+
+    def _update_arena(self):
+        """보스 HP 티어에 따라 유효 반경을 목표치로 2턴에 걸쳐 선형 축소.
+        전멸기('혈월 강림') 진행 중엔 보류(종료 후 재개)."""
+        cfg = self.config
+        ap = self.boss.active_pattern
+        if ap is not None and ap.mode == "seal":
+            return
+        ratio = self.boss.hp / max(1, cfg.boss_max_hp)
+        if ratio > 0.75:
+            tier = 0
+        elif ratio > 0.50:
+            tier = 1
+        elif ratio > 0.25:
+            tier = 2
+        else:
+            tier = 3
+        target = cfg.arena_radius_tiers[tier]
+        if self.arena_radius > target + 1e-9:
+            if abs(self._arena_target - target) > 1e-9:
+                self._arena_target = target
+                self._arena_shrink_step = (self.arena_radius - target) / max(1, cfg.arena_shrink_turns)
+            self.arena_radius = max(target, self.arena_radius - self._arena_shrink_step)
+            self._push_units_inside()
+            self._reposition_pillars_inside_arena()
 
     # ────────────── 보스 관련 ──────────────
     def _boss_dist(self, x: float, y: float) -> float:
@@ -628,8 +825,7 @@ class RaidEnv:
         step = min(self.config.boss_move_speed, dist)
         nx = b.x + dx / dist * step
         ny = b.y + dy / dist * step
-        nx = min(max(nx, self.config.boss_radius), self.config.map_width - self.config.boss_radius)
-        ny = min(max(ny, self.config.boss_radius), self.config.map_height - self.config.boss_radius)
+        nx, ny = self._clamp_arena(nx, ny, self.config.boss_radius)
         # 기둥 충돌 회피 (통과 금지)
         for p in self.pillars:
             if p.alive and math.hypot(nx - p.x, ny - p.y) < self.config.boss_radius + p.radius - 0.05:
@@ -673,6 +869,8 @@ class RaidEnv:
         # 임팩트 (rush_dash 는 _tick_rush 에서 별도 처리)
         if step.kind == "brand":
             self._impact_brand(ap, step)
+        elif step.kind == "parry":
+            self._impact_parry(ap, step)
         else:
             self._impact_aoe(ap, step.damage)
         self.boss.advance_step()
@@ -777,7 +975,7 @@ class RaidEnv:
             s = min(substep, remaining)
             nx = b.x + dirx * s
             ny = b.y + diry * s
-            if not (R <= nx <= cfg.map_width - R and R <= ny <= cfg.map_height - R):
+            if not self._in_arena(nx, ny, R):
                 wall = True
                 break
             for p in self.pillars:
@@ -844,7 +1042,13 @@ class RaidEnv:
     # ── 카운터 창 ──
     def _tick_counter(self, ap: ActivePattern):
         if self._counter_success:
-            self.boss.grog_turns = max(self.boss.grog_turns, 3)
+            # 스태거(카운터 성공)를 그로기 세팅 전에 적용
+            cuid = self._counter_uid if self._counter_uid is not None else self.config.player_slot
+            cu = self.units.get(cuid)
+            if cu is not None:
+                self._apply_stagger(cu, int(RaidActionID.COUNTER))
+            self.boss.grog_turns = max(self.boss.grog_turns,
+                                       self.config.counter_success_grog_turns)
             self.boss.counter_window_turns = 0
             for uid in self.units:
                 self.step_events[uid].append({"type": "counter_success"})
@@ -895,7 +1099,31 @@ class RaidEnv:
                 return True
         return False
 
+    def _seal_explode_next_pillar(self, ap: ActivePattern):
+        """전멸기 진행 중 기둥 1개 시계방향 파괴 (중심 기준 각도 정렬). 최소 1개 생존 보장."""
+        cx, cy = self.config.arena_center
+        alive = [p for p in self.pillars if p.alive]
+        if len(alive) <= 1:
+            return   # 최소 1개는 항상 생존
+        # 시계방향 = 각도 내림차순. 살아있는 것 중 다음(첫 생존자)을 파괴하면 자연 스윕.
+        order = sorted(self.pillars, key=lambda p: math.atan2(p.y - cy, p.x - cx), reverse=True)
+        for p in order:
+            if p.alive:
+                p.alive = False
+                p.respawn_timer = self.config.pillar_respawn_turns
+                for uid in self.units:
+                    self.step_events[uid].append({"type": "pillar_explode",
+                                                  "x": float(p.x), "y": float(p.y)})
+                break
+
     def _tick_seal(self, ap: ActivePattern):
+        # 순차 기둥 폭발: 경과 8/15/22턴 시점에 1개씩 시계방향 파괴 (최소 1개 생존).
+        done = ap.extra.setdefault("explode_done", set())
+        elapsed = ap.total_this_step - ap.turns_remaining
+        for th in (8, 15, 22):
+            if th not in done and elapsed >= th:
+                done.add(th)
+                self._seal_explode_next_pillar(ap)
         hidden_flags = {u.uid: (u.alive and self._unit_hidden(u)) for u in self.units.values()}
         # 판정은 "생존자 전원 은신" — 이미 죽은 파티원이 기믹을 자동 실패시키지 않게.
         all_hidden = all(hidden_flags[u.uid] for u in self.units.values() if u.alive)
@@ -950,6 +1178,7 @@ class RaidEnv:
             if not p.alive:
                 p.alive = True
             p.respawn_timer = 0
+        self._reposition_pillars_inside_arena()
 
     def force_seal(self):
         self.boss.active_pattern = None
@@ -1017,9 +1246,9 @@ class RaidEnv:
               math.sin(b.facing), math.cos(b.facing),
               1.0 if b.counter_window_turns > 0 else 0.0]
 
-        # [4] Pattern channels (10 x 4 = 40)
+        # [4] Pattern channels (11 x 4 = 44)
         ap = b.active_pattern
-        for pid_int in range(10):
+        for pid_int in range(len(PatternID)):
             active = 1.0 if (ap is not None and int(ap.pattern_id) == pid_int) else 0.0
             if active:
                 turns_norm = ap.turns_remaining / max(1, ap.total_this_step)
@@ -1052,7 +1281,7 @@ class RaidEnv:
 
         # [7] Coop (8): stagger(2) + seal_los(4) + counter(2)
         v += [1.0 if b.stagger_active else 0.0,
-              b.stagger_gauge / max(1.0, cfg.stagger_gauge)]
+              b.stagger_gauge / max(1.0, cfg.stagger_max)]
         seal_active = 1.0 if (ap is not None and ap.mode == "seal") else 0.0
         hidden = 1.0 if (seal_active and self._unit_hidden(u)) else 0.0
         v += [seal_active, bdx / 10.0, bdy / 10.0, hidden]
@@ -1141,8 +1370,10 @@ class RaidEnv:
                 "stun": int(b.stun_turns),
                 "stagger_active": bool(b.stagger_active),
                 "stagger_gauge": float(b.stagger_gauge),
+                "stagger_max": float(self.config.stagger_max),
                 "counter_window": int(b.counter_window_turns),
                 "radius": float(self.config.boss_radius),
+                "arena_radius": float(self.arena_radius),
                 "vx": float(b.x - self._prev_boss_pos[0]),
                 "vy": float(b.y - self._prev_boss_pos[1]),
                 "active_pattern": int(ap.pattern_id) if ap is not None else -1,
@@ -1154,6 +1385,7 @@ class RaidEnv:
                 {
                     "uid": int(u.uid), "role": int(u.role),
                     "x": float(u.x), "y": float(u.y),
+                    "facing": float(u.facing),
                     "hp": int(u.hp), "max_hp": int(u.max_hp),
                     "alive": bool(u.alive),
                     "marked": bool(u.marked_turns > 0),

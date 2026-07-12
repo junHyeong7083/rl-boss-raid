@@ -13,14 +13,20 @@ namespace BossRaid
     ///
     /// 조작 매핑:
     ///   우클릭(누름/드래그) = 지면 클릭 지점으로 이동(8방향 양자화, MOVE 1~8). 도달 시 정지.
-    ///   Q = 혈창 투척(10, 조준형: AoE r1.8/사거리7/쿨3, cd "skill")
-    ///   W = 혈월 낙하(18, 조준형: AoE r3.0/사거리9/쿨7, cd "skill2")
-    ///   Space = 기본공격(9, 조준형: AoE r1.2/사거리5/쿨 없음, cd 없음) — 롤 논스마트키식 설치기
+    ///   Q = 혈창 투척(10, 조준형: 사거리7/AoE r1.8, cd "skill")
+    ///   W = 혈월 낙하(18, 조준형: 사거리9/AoE r3.0, cd "skill2")
+    ///   R = 혈월 처형(20, 조준형: 사거리9/AoE r4.0, cd "ult")
     ///   E = 카운터(17, 즉시, cd "counter")
     ///   Shift = 대시(19, 즉발 방향기: 조준 모드 없이 마우스 지면 포인트 방향으로 즉시 2.5 이동,
     ///           서버가 거리 클램프. cd "dash" 17턴≈5s). 마우스 포인트 없으면 현재 이동 방향, 없으면 무시.
-    ///   조준 중: 좌클릭 = 발사, 같은 키 재입력/Esc = 취소, 다른 조준 스킬 키 = 대상 전환,
-    ///            우클릭 이동은 그대로 동작(무빙 조준). 대시는 조준 중에도 조준을 유지한 채 발동.
+    ///   좌클릭(조준 모드가 아닐 때) 또는 C = 평타(9, 방향 스킬샷 — skills 배열과 별도 전용 핸들러).
+    ///           마우스 지면 포인트를 그대로 SendActionAimed(9, tx, ty) 로 보내면 서버가 "방향"만 취해
+    ///           고정 사거리 라인 공격을 낸다(조준 모드 불요, 쿨 없음). 연타는 0.12s 최소 간격 가드.
+    ///   G = 패링(21, 즉시 — 조준/방향 불요, 서버가 facing 판정. cd "parry" 10턴).
+    ///   조준 중: 좌클릭 = 발사(평타보다 우선), 같은 키 재입력/Esc = 취소, 다른 조준 스킬 키 = 대상 전환,
+    ///            우클릭 이동은 그대로 동작(무빙 조준). 대시/패링은 조준 중에도 조준을 유지한 채 발동.
+    ///   Space = 평타에서 제거(재량 결정). 평타 전용 키는 basicAttackKey(기본 C) 하나 — 원하면 인스펙터에서
+    ///           KeyCode.Space 로 바꾸거나 KeyCode.None 으로 비활성(좌클릭만 사용) 가능.
     ///
     /// 원칙:
     ///   - 스킬 발동은 즉시 전송(이동보다 우선). 그 턴의 이동 전송은 1회 스킵.
@@ -60,15 +66,15 @@ namespace BossRaid
         [Tooltip("조준 표시기(사거리 링 + AoE 레티클). 비우면 런타임 생성.")]
         [SerializeField] private SkillAimIndicator aimIndicator;
 
-        [Header("Skills (설치기 개편 딜러 킷)")]
+        // 평타(9)/패링(21)은 배열에서 제외 — 대시처럼 전용 즉발 핸들러로 처리(아래 헤더 참고).
+        [Header("Skills (설치기 개편 딜러 킷 — 조준형 Q/W/R + 즉시 E)")]
         [SerializeField]
         private SkillBinding[] skills = new SkillBinding[]
         {
-            new SkillBinding { label = "혈창 투척", key = KeyCode.Q,     actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20 },
-            new SkillBinding { label = "혈월 낙하", key = KeyCode.W,     actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40 },
-            new SkillBinding { label = "카운터",   key = KeyCode.E,     actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 25 },
-            new SkillBinding { label = "기본공격", key = KeyCode.Space, actionId = 9,  cooldownKey = "",        aimed = true,  range = 5f, aoeRadius = 1.2f, maxCooldown = 0 },
-            new SkillBinding { label = "혈월 처형", key = KeyCode.R,     actionId = 20, cooldownKey = "ult",     aimed = true,  range = 9f, aoeRadius = 4.0f, maxCooldown = 200 },
+            new SkillBinding { label = "혈창 투척", key = KeyCode.Q, actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20 },
+            new SkillBinding { label = "혈월 낙하", key = KeyCode.W, actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40 },
+            new SkillBinding { label = "카운터",   key = KeyCode.E, actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 25 },
+            new SkillBinding { label = "혈월 처형", key = KeyCode.R, actionId = 20, cooldownKey = "ult",     aimed = true,  range = 9f, aoeRadius = 4.0f, maxCooldown = 200 },
         };
 
         [Header("Dash (Shift, 즉발 방향기 — skills 배열과 별도 처리)")]
@@ -82,6 +88,24 @@ namespace BossRaid
         [SerializeField] private int dashCooldown = 17;
         [Tooltip("대시 이동 거리(sim 단위 — 서버가 클램프). 마우스 폴백 조준점/체감 임펄스 산정용.")]
         [SerializeField] private float dashDistanceSim = 2.5f;
+
+        [Header("Basic Attack (좌클릭/C, 방향 스킬샷 — skills 배열과 별도 처리)")]
+        [Tooltip("평타 보조 키. 좌클릭(조준 모드가 아닐 때)과 함께 동작. 비활성화하려면 KeyCode.None.")]
+        [SerializeField] private KeyCode basicAttackKey = KeyCode.C;
+        [Tooltip("평타 액션 ID (Python 계약: ATTACK_BASIC=9). 마우스 지면 포인트를 방향 지시점으로 전송.")]
+        [SerializeField] private int basicAttackActionId = 9;
+        [Tooltip("연타 스팸 가드 — 클라 최소 전송 간격(초). 서버는 최신값만 쓰므로 중복은 무해하나 부하 절감.")]
+        [SerializeField] private float basicAttackMinInterval = 0.12f;
+
+        [Header("Parry (G, 즉발 — 조준/방향 불요, 서버가 facing 판정)")]
+        [Tooltip("패링 입력 키. 기본 G.")]
+        [SerializeField] private KeyCode parryKey = KeyCode.G;
+        [Tooltip("패링 액션 ID (Python 계약: PARRY=21).")]
+        [SerializeField] private int parryActionId = 21;
+        [Tooltip("패링 쿨다운 스냅샷 키. 서버 cooldowns[\"parry\"].")]
+        [SerializeField] private string parryCooldownKey = "parry";
+        [Tooltip("패링 클라 예측 쿨다운(턴). 서버 10턴.")]
+        [SerializeField] private int parryCooldown = 10;
 
         [Header("Movement")]
         [Tooltip("지면 평면 높이(y). 스냅샷 렌더는 y=0 평면을 쓴다.")]
@@ -122,6 +146,7 @@ namespace BossRaid
         private DealerAnimationDriver _animDriver;     // 딜러 액션별 원샷 애니 재생기(딜러 스폰 시 부착)
         private int _lastSentMoveAction = -1;         // 즉시 전송 중복 방지(드래그 중 같은 방향이면 스킵)
         private SkillBinding _aiming;                 // 현재 조준 중인 스킬 (null = 조준 아님)
+        private float _lastBasicAttackTime = -999f;    // 평타 연타 스팸 가드용 마지막 전송 시각(unscaled)
 
         private void Awake()
         {
@@ -237,16 +262,23 @@ namespace BossRaid
             // 1) 스킬 키: 조준형은 조준 모드 진입/취소/전환, 즉시형은 즉시 전송. 쿨다운 가드.
             HandleSkillInput();
 
-            // 2) 조준 모드: 레티클 갱신(무빙 조준) + 좌클릭 발사 + Esc 취소.
+            // 2) 평타(좌클릭/C): 조준 모드가 아닐 때만 좌클릭 소비. 조준 모드 중 좌클릭은 (3)의 발사 확정이 우선.
+            //    → HandleAimingMode 보다 먼저 호출: 발사 확정 프레임에 CancelAiming 후 좌클릭이 평타로 새는 것을 방지.
+            HandleBasicAttackInput();
+
+            // 3) 조준 모드: 레티클 갱신(무빙 조준) + 좌클릭 발사 + Esc 취소.
             HandleAimingMode();
 
-            // 3) Shift = 대시: 조준 모드와 무관하게 즉발(조준 중이면 조준 유지). 쿨다운 가드.
+            // 4) Shift = 대시: 조준 모드와 무관하게 즉발(조준 중이면 조준 유지). 쿨다운 가드.
             HandleDashInput();
 
-            // 4) 우클릭(누름/드래그): 목표 지점 갱신 + 마커 표시 + 즉시 전송. (조준 중에도 동작)
+            // 5) G = 패링: 즉발(조준/방향 불요, 서버가 facing 판정). 쿨다운 가드.
+            HandleParryInput();
+
+            // 6) 우클릭(누름/드래그): 목표 지점 갱신 + 마커 표시 + 즉시 전송. (조준 중에도 동작)
             HandleMoveInput();
 
-            // 5) 도달 판정(예측 표시 위치 기준, 매 프레임): 마커가 늦게 꺼지는 느낌 방지.
+            // 7) 도달 판정(예측 표시 위치 기준, 매 프레임): 마커가 늦게 꺼지는 느낌 방지.
             if (_hasDestination && TryGetDealerDisplayPos(out var cur))
             {
                 Vector2 delta = new Vector2(_destination.x - cur.x, _destination.z - cur.z);
@@ -306,7 +338,7 @@ namespace BossRaid
                 }
                 else
                 {
-                    // 즉시형(E 카운터 / Space 평타): 조준 없이 즉시 전송.
+                    // 즉시형(E 카운터): 조준 없이 즉시 전송.
                     RaidSession.Instance?.SendAction(sk.actionId);
                     skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
                     _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
@@ -437,6 +469,58 @@ namespace BossRaid
             float cell = viewer != null ? viewer.cellSize : 1f;
             Vector3 origin = viewer != null ? viewer.gridOrigin : Vector3.zero;
             return new Vector2((world.x - origin.x) / cell, (world.z - origin.z) / cell);
+        }
+
+        // ─────────────── 평타 (좌클릭/C, 방향 스킬샷) ───────────────
+
+        /// <summary>
+        /// 평타: 좌클릭(조준 모드가 아닐 때) 또는 C. 마우스 지면 포인트를 그대로 SendActionAimed(9, tx, ty)로
+        /// 보내면 서버가 그 지점을 "방향 지시점"으로만 취해 고정 사거리 라인 공격을 낸다(조준 모드 불요, 쿨 없음).
+        /// 조준 중 좌클릭은 발사 확정이 우선이므로 좌클릭은 조준 모드가 아닐 때만 소비한다(HandleAimingMode 앞에서 호출).
+        /// 연타 스팸 가드로 최소 간격(basicAttackMinInterval)을 둔다 — 서버는 최신값만 쓰므로 안전성용.
+        /// </summary>
+        private void HandleBasicAttackInput()
+        {
+            bool byKey = basicAttackKey != KeyCode.None && WasKeyPressedThisFrame(basicAttackKey);
+            bool byClick = _aiming == null && ReadLeftMouseDown();   // 조준 중 좌클릭은 발사 확정이 우선
+            if (!byKey && !byClick) return;
+
+            if (Time.unscaledTime - _lastBasicAttackTime < basicAttackMinInterval) return;
+            if (!TryGetGroundPoint(out var pt)) return;
+
+            Vector2 sim = WorldToSim(pt);
+            RaidSession.Instance?.SendActionAimed(basicAttackActionId, sim.x, sim.y);
+            _lastBasicAttackTime = Time.unscaledTime;
+            _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 평타는 쿨 없음 → 예측 쿨 미설정.
+        }
+
+        // ─────────────── 패링 (G, 즉발) ───────────────
+
+        /// <summary>
+        /// G 패링: 즉발. 조준/방향 불요 — 서버가 facing 조건을 판정한다. SendAction(21).
+        /// 쿨다운 중이면 스킬바 흔들림 피드백(조준/이동 불변). 조준 중이어도 조준을 유지.
+        /// </summary>
+        private void HandleParryInput()
+        {
+            if (!WasKeyPressedThisFrame(parryKey)) return;
+
+            if (GetParryCooldown() > 0)
+            {
+                skillBar?.Shake(parryCooldownKey);
+                return;
+            }
+
+            RaidSession.Instance?.SendAction(parryActionId);
+            skillBar?.StartPredictedCooldown(parryCooldownKey, parryCooldown);
+            _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 조준은 유지.
+        }
+
+        /// <summary>패링 유효 쿨다운 = max(서버 스냅샷 "parry", 스킬바 클라 예측).</summary>
+        private int GetParryCooldown()
+        {
+            int server = GetCooldown(parryCooldownKey);
+            int predicted = skillBar != null ? skillBar.GetEffectiveCooldown(parryCooldownKey) : 0;
+            return Mathf.Max(server, predicted);
         }
 
         /// <summary>유효 쿨다운 = max(서버 스냅샷 값, 스킬바 클라 예측 값).</summary>

@@ -34,7 +34,7 @@ namespace BossRaid
         [Tooltip("직접 지정할 Canvas(비우면 Screen Space Overlay 자체 생성).")]
         [SerializeField] private Canvas canvas;
 
-        [Header("Slots (설치기 개편 딜러 킷 5종, 확장 가능)")]
+        [Header("Slots (조작 개편 딜러 킷 7종, 확장 가능)")]
         [SerializeField]
         private SkillSlotDef[] slotDefs = new SkillSlotDef[]
         {
@@ -43,7 +43,8 @@ namespace BossRaid
             new SkillSlotDef { label = "카운터", keyLabel = "E",     cooldownKey = "counter", maxCooldown = 25 },
             new SkillSlotDef { label = "혈월처형", keyLabel = "R",   cooldownKey = "ult",     maxCooldown = 200 },
             new SkillSlotDef { label = "대시",   keyLabel = "Shift", cooldownKey = "dash",    maxCooldown = 17 },
-            new SkillSlotDef { label = "평타",   keyLabel = "Space", cooldownKey = "",        maxCooldown = 0 },
+            new SkillSlotDef { label = "가드",   keyLabel = "G",     cooldownKey = "parry",   maxCooldown = 10 },
+            new SkillSlotDef { label = "평타",   keyLabel = "C",     cooldownKey = "",        maxCooldown = 0 },
         };
 
         [Header("Style (로아 톤)")]

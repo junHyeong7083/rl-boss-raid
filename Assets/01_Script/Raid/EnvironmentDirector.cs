@@ -97,6 +97,20 @@ namespace BossRaid
 
         private Transform _cam;
 
+        // ── 원형 아레나 축소 표현 ──
+        private const float ArenaCenterSimX = 10f;    // BossArenaBuilder Center=(10,10)
+        private const float ArenaCenterSimY = 10f;
+        private const float DarkOuterWorld = 18f;     // 어둠 오버레이 바깥 반경(바닥 반경 16 + 여유)
+        private const int EdgeMarkerCount = 16;       // 경계 러블 개수(절제)
+        private static readonly Color OutOfBoundsDark = new Color(0.015f, 0.0f, 0.02f, 0.62f); // 경계 밖 어둠
+        private static readonly Color OutOfBoundsRim  = new Color(0.55f, 0.06f, 0.06f, 1f);    // 경계 안쪽 핏빛 림
+        private GameObject _boundaryDark;             // 경계 밖 어둠 도넛 오버레이
+        private Material _boundaryDarkMat;
+        private readonly List<Transform> _edgeMarkers = new List<Transform>();
+        private Mesh _dressingMesh;                   // 재활용할 기둥/소품 메시
+        private Material _dressingMat;
+        private float _edgeLastRadius = -1f;          // 마지막 배치 반경(축소 시 재배치)
+
         // 셰이더 프로퍼티 ID
         private static readonly int IdBaseColor = Shader.PropertyToID("_BaseColor");
         private static readonly int IdColor     = Shader.PropertyToID("_Color");
@@ -129,6 +143,7 @@ namespace BossRaid
             ResolveMoon(arena, missing);
             ResolvePillars(arena, missing);
             ResolveLights(arena, missing);
+            ResolveDressingSource(arena);
 
             // 안개/앰비언트 정적 세팅(밀도는 불변, 색만 Update 에서 페이즈 lerp)
             RenderSettings.fog = true;
@@ -298,6 +313,7 @@ namespace BossRaid
             UpdatePointLights(t);
             UpdateDirectional(p3);
             UpdateFloor(t);
+            UpdateArenaBounds();
         }
 
         private void UpdateFogAmbient(float p3)
@@ -392,6 +408,179 @@ namespace BossRaid
             _floor.GetPropertyBlock(_floorMpb);
             _floorMpb.SetColor(_floorUsesBaseColor ? IdBaseColor : IdColor, baseCol);
             _floor.SetPropertyBlock(_floorMpb);
+        }
+
+        // ─────────────── 원형 아레나 축소 표현 ───────────────
+
+        /// <summary>경계 밖 어둠 오버레이(도넛) + 경계 러블 링을 재활용할 메시/머티리얼 확보.</summary>
+        private void ResolveDressingSource(Transform arena)
+        {
+            // 이미 씬에 구워진 소품(Props)/기둥(Pillars) 메시를 재활용(스타일 일관).
+            Transform src = Locate(arena, "Props");
+            if (src == null) src = Locate(arena, "Pillars");
+            MeshFilter mf = src != null ? src.GetComponentInChildren<MeshFilter>() : null;
+            if (mf == null && _pillars.Count > 0 && _pillars[0] != null)
+                mf = _pillars[0].GetComponentInChildren<MeshFilter>();
+
+            if (mf != null && mf.sharedMesh != null)
+            {
+                _dressingMesh = mf.sharedMesh;
+                var r = mf.GetComponent<Renderer>();
+                _dressingMat = r != null ? r.sharedMaterial : null;
+            }
+            // 폴백: 씬에 쓸 메시가 없으면 이후 EnsureEdgeMarkers 에서 Cylinder 프리미티브로 생성.
+        }
+
+        private float ArenaRadiusSim()
+        {
+            var b = Boss();
+            return b != null ? b.arena_radius : 0f;
+        }
+
+        private Vector3 ArenaCenterWorld()
+        {
+            return _viewer != null
+                ? _viewer.ContinuousToWorld(ArenaCenterSimX, ArenaCenterSimY)
+                : new Vector3(ArenaCenterSimX, 0f, ArenaCenterSimY);
+        }
+
+        private float CellSize() => _viewer != null ? _viewer.cellSize : 1f;
+
+        /// <summary>arena_radius(sim)에 맞춰 경계 밖 어둠 도넛과 경계 러블 링을 갱신.</summary>
+        private void UpdateArenaBounds()
+        {
+            float rSim = ArenaRadiusSim();
+            if (rSim <= 0.01f)
+            {
+                if (_boundaryDark != null && _boundaryDark.activeSelf) _boundaryDark.SetActive(false);
+                return;
+            }
+            float rWorld = rSim * CellSize();
+            Vector3 center = ArenaCenterWorld();
+
+            UpdateBoundaryDark(center, rWorld);
+            UpdateEdgeMarkers(center, rSim, rWorld);
+        }
+
+        /// <summary>경계 밖(도넛 r_in=아레나 반경 ~ r_out=32) 어둡게: "여기부턴 못 간다".</summary>
+        private void UpdateBoundaryDark(Vector3 center, float rWorld)
+        {
+            EnsureBoundaryDark();
+            _boundaryDark.SetActive(true);
+            _boundaryDark.transform.position = new Vector3(center.x, 0.02f, center.z);
+            float diam = DarkOuterWorld * 2f;
+            _boundaryDark.transform.localScale = new Vector3(diam, diam, diam);
+            float ratio = Mathf.Clamp01(rWorld / DarkOuterWorld);   // 안쪽(아레나) 구멍 비율
+            if (_boundaryDarkMat != null) _boundaryDarkMat.SetFloat("_DonutInnerRatio", ratio);
+        }
+
+        private void EnsureBoundaryDark()
+        {
+            if (_boundaryDark != null) return;
+            var go = new GameObject("ArenaOutOfBoundsDark");
+            go.transform.SetParent(transform, false);
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+            mf.sharedMesh = GroundQuad();
+
+            var sh = Shader.Find("BossRaid/Telegraph");
+            if (sh == null) sh = Shader.Find("Sprites/Default");
+            _boundaryDarkMat = new Material(sh);
+            if (sh != null && sh.name == "BossRaid/Telegraph")
+            {
+                _boundaryDarkMat.SetInt("_ShapeType", 4);          // donut
+                _boundaryDarkMat.SetFloat("_Fill", 1f);            // 링 전체 균일 채움(어둠)
+                _boundaryDarkMat.SetFloat("_Progress", 1f);
+                _boundaryDarkMat.SetFloat("_Pulse", 0f);
+                _boundaryDarkMat.SetFloat("_InteriorDim", 1f);     // 미채움/채움 색차 제거 → 균일
+                _boundaryDarkMat.SetFloat("_InteriorBright", 1f);
+                _boundaryDarkMat.SetFloat("_UnfilledAlpha", 1f);
+                _boundaryDarkMat.SetFloat("_OutlineWidth", 0.012f);// 얇은 안쪽 핏빛 림
+                _boundaryDarkMat.SetColor("_Color", OutOfBoundsDark);
+                _boundaryDarkMat.SetColor("_OutlineColor", OutOfBoundsRim);
+                _boundaryDarkMat.SetFloat("_DonutInnerRatio", 0.4f);
+            }
+            else _boundaryDarkMat.color = OutOfBoundsDark;
+
+            mr.sharedMaterial = _boundaryDarkMat;
+            mr.shadowCastingMode = ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            _boundaryDark = go;
+        }
+
+        /// <summary>경계 원주에 러블(재활용 메시)을 링 배치. 축소하면 안쪽으로 재배치.</summary>
+        private void UpdateEdgeMarkers(Vector3 center, float rSim, float rWorld)
+        {
+            EnsureEdgeMarkers();
+            // 반경 변화가 눈에 띌 때만 재배치(정지 시 비용 0).
+            if (_edgeLastRadius > 0f && Mathf.Abs(rSim - _edgeLastRadius) < 0.05f) return;
+            _edgeLastRadius = rSim;
+
+            for (int i = 0; i < _edgeMarkers.Count; i++)
+            {
+                var t = _edgeMarkers[i];
+                if (t == null) continue;
+                float ang = (float)i / _edgeMarkers.Count * Mathf.PI * 2f;
+                var pos = center + new Vector3(Mathf.Cos(ang) * rWorld, 0f, Mathf.Sin(ang) * rWorld);
+                pos.y = 0f;
+                t.position = pos;
+                // 중심을 등지도록 살짝 회전(결정적).
+                t.rotation = Quaternion.Euler(0f, ang * Mathf.Rad2Deg + (i * 37 % 60), 0f);
+            }
+        }
+
+        private void EnsureEdgeMarkers()
+        {
+            if (_edgeMarkers.Count > 0) return;
+
+            bool usePrimitive = _dressingMesh == null;
+            Mesh mesh = _dressingMesh;
+            Material mat = _dressingMat;
+            if (usePrimitive)
+            {
+                // 폴백: 원기둥 프리미티브 메시 1회 확보 후 파괴(메시만 재사용).
+                var tmp = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+                mesh = tmp.GetComponent<MeshFilter>().sharedMesh;
+                Destroy(tmp);
+            }
+
+            for (int i = 0; i < EdgeMarkerCount; i++)
+            {
+                var go = new GameObject("ArenaEdgeMarker_" + i);
+                go.transform.SetParent(transform, false);
+                var mf = go.AddComponent<MeshFilter>();
+                var mr = go.AddComponent<MeshRenderer>();
+                mf.sharedMesh = mesh;
+                if (mat != null) mr.sharedMaterial = mat;
+                // 낮은 러블 느낌(배경 기둥과 구분): 작고 납작하게, 인덱스별 소폭 변주.
+                float s = 0.5f + (i % 3) * 0.12f;
+                go.transform.localScale = new Vector3(s, 0.4f + (i % 2) * 0.15f, s);
+                mr.shadowCastingMode = ShadowCastingMode.Off;
+                _edgeMarkers.Add(go.transform);
+            }
+        }
+
+        // 바닥(XZ)에 눕힌 1x1 Quad(도넛 오버레이용).
+        private static Mesh _groundQuad;
+        private static Mesh GroundQuad()
+        {
+            if (_groundQuad != null) return _groundQuad;
+            var mesh = new Mesh { name = "EnvDir_GroundQuad" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, 0f, -0.5f), new Vector3(0.5f, 0f, -0.5f),
+                new Vector3( 0.5f, 0f,  0.5f), new Vector3(-0.5f, 0f,  0.5f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(1f, 1f), new Vector2(0f, 1f),
+            };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+            _groundQuad = mesh;
+            return mesh;
         }
 
         // ─────────────── 앰비언트 파티클(2계층) ───────────────

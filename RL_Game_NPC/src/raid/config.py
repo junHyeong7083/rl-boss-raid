@@ -21,7 +21,7 @@ class PartyRole(IntEnum):
 
 
 class PatternID(IntEnum):
-    """보스 패턴 10종 — '혈월의 마수 군주'."""
+    """보스 패턴 11종 — '혈월의 마수 군주'."""
     TRIPLE_CLAW = 0     # 삼연 발톱 (전방 부채꼴 콤보 3스텝)
     EARTH_CRUSH = 1     # 대지 분쇄 (중심 원 → 충격파 도넛 2스텝)
     FRENZY_RUSH = 2     # 폭주 돌진 (직선 + 기둥 충돌 그로기 기믹)
@@ -30,8 +30,9 @@ class PatternID(IntEnum):
     BLOOD_ROAR = 5      # 혈흔의 포효 (도넛, 몸쪽 안전, P2+)
     CRIMSON_BRAND = 6   # 붉은 낙인 (표식 산개, P2+)
     COUNTER_RUSH = 7    # 카운터 돌진 (파란 발광 창, 저지 기믹)
-    STAGGER_LIFT = 8    # 무력화 — 기둥 들어올리기 (스태거 게이지, P2+)
+    STAGGER_LIFT = 8    # (폐지) 무력화 기둥 들어올리기 — 상시 스태거 게이지로 대체, 가중치 0
     SEAL_WIPE = 9       # 전멸기 '혈월 강림' (페이즈 전환, LOS 은신)
+    YELLOW_BURST = 10   # 노란 확산 원 — 패링(G) 파훼 기믹 (플레이어 편향, kind="parry")
 
 
 class PhaseID(IntEnum):
@@ -77,6 +78,7 @@ class RaidActionID(IntEnum):
     SKILL_2 = 18            # 딜러 W 혈월 낙하 (대형 조준 AoE, 딜러 전용)
     DASH = 19              # 딜러 회피 기동기 — 조준 방향으로 dash_distance 즉시 이동
     ULTIMATE = 20          # 딜러 R 궁극기 '혈월 처형' (초대형 조준 AoE, 딜러 전용)
+    PARRY = 21             # 딜러 G 패링 — YELLOW_BURST(노란 확산 원) 파훼 저지
 
 
 # 별칭 (boss_streamer 계열 재사용 호환 — BossActionID 이름도 노출)
@@ -110,6 +112,15 @@ class RaidConfig:
     # ── 맵 (연속 공간) ──
     map_width: float = 20.0
     map_height: float = 20.0
+
+    # ── 원형 아레나 (HP 연동 축소) ──
+    # 이동/대시/보스 이동 클램프는 사각 경계가 아니라 이 원(중심 arena_center, 반경 = 유효반경 - u.radius).
+    # 유효 반경은 보스 HP 구간에 따라 티어별로 축소(티어 변경 시 2턴에 걸쳐 선형). 전멸기 중엔 보류.
+    # HP 100~75 / 75~50 / 50~25 / 25~0% → arena_radius_tiers[0..3].
+    arena_center: Tuple[float, float] = (10.0, 10.0)
+    arena_radius_tiers: Tuple[float, float, float, float] = (9.6, 8.8, 8.2, 7.6)
+    arena_shrink_turns: int = 2               # 티어 변경 시 축소에 걸리는 턴수(선형)
+    pillar_inner_margin: float = 2.0          # 기둥이 (유효반경 - 이 값) 밖이면 중심 쪽으로 비율 이동
 
     # ── 파티 ──
     party_roles: List[PartyRole] = field(default_factory=lambda: [
@@ -168,10 +179,10 @@ class RaidConfig:
 
     # ── 관측 / 행동 ──
     # 관측 구성 (총 128차원) — 상세 표는 docs/RAID_V2_DESIGN.md 및 아래 OBS_LAYOUT:
-    #   Self(16) + Allies(24) + Boss(12) + PatternCh(10x4=40) + Danger(8)
-    #   + Escape(4) + Coop(8) + Pillars(12) + Player(4) = 128
-    obs_size: int = 128
-    num_actions: int = 21
+    #   Self(16) + Allies(24) + Boss(12) + PatternCh(11x4=44) + Danger(8)
+    #   + Escape(4) + Coop(8) + Pillars(12) + Player(4) = 132
+    obs_size: int = 132
+    num_actions: int = 22
 
     # ── 대시(회피 기동기, 딜러) ──
     # 조준 방향(aim_points)으로 dash_distance 즉시 이동. aim 없으면 이동 방향/보스 반대 방향 폴백.
@@ -190,6 +201,7 @@ class RaidConfig:
         int(RaidActionID.COUNTER): 25,       # 딜러 E 저지 (25턴=7.5s)
         int(RaidActionID.DASH): 17,          # 딜러 대시 회피 (17턴=5.1s)
         int(RaidActionID.ULTIMATE): 200,     # 딜러 R 궁극 '혈월 처형' (200턴=60.0s)
+        int(RaidActionID.PARRY): 10,         # 딜러 G 패링 (10턴=3.0s)
         int(RaidActionID.TAUNT): 6,          # (6턴=1.8s)
         int(RaidActionID.GUARD): 4,          # (4턴=1.2s)
         int(RaidActionID.HEAL): 4,           # (4턴=1.2s)
@@ -213,10 +225,14 @@ class RaidConfig:
     aim_ult_range: float = 9.0
     aim_ult_damage: int = 400
     ult_stagger_contrib: float = 60.0
-    # 평타 (딜러 ATTACK_BASIC) — 롤 논스마트키식 지면 조준 설치기.
-    # 쿨 없음, 데미지는 유닛 attack 그대로(별도 상수 없음). Q/W보다 작은 반경/짧은 사거리.
+    # 평타 (딜러 ATTACK_BASIC) — 롤 제리 Q 식 "방향 라인 스킬샷".
+    # 쿨 없음, 데미지는 유닛 attack 그대로(별도 상수 없음). aim_points(tx,ty)는 "방향 지시점"으로만
+    # 사용 — 플레이어 위치에서 그 방향으로 고정 길이 aim_basic_range(5.0), 반폭 aim_basic_halfwidth(0.5)
+    # 라인 판정(보스 원과 교차 시 명중). 사거리 내 어디를 찍든 방향만 사용.
+    # (aim_basic_radius 는 레거시 — 라인화 후 미사용.)
     aim_basic_radius: float = 1.2
     aim_basic_range: float = 5.0
+    aim_basic_halfwidth: float = 0.5
 
     # ── 패턴별 쿨타임 배율 (페이즈별) ──
     phase_cooldown_scale: Tuple[float, float, float] = (1.0, 0.85, 0.7)
@@ -227,25 +243,27 @@ class RaidConfig:
     pattern_gap_turns: int = 5
 
     # ── 페이즈별 패턴 가중치 (SEAL_WIPE 은 페이즈 전환 시 강제 — 여기 없음) ──
+    # STAGGER_LIFT 은 상시 스태거 게이지 시스템으로 대체 — 풀에서 제거(가중치 0).
+    # YELLOW_BURST(패링 파훼) 는 P1 부터 0.12 로 풀에 상시 포함.
     pattern_weights: Dict[int, Dict[int, float]] = field(default_factory=lambda: {
         int(PhaseID.P1): {
             int(PatternID.TRIPLE_CLAW): 0.28, int(PatternID.EARTH_CRUSH): 0.22,
             int(PatternID.FRENZY_RUSH): 0.22, int(PatternID.PILLAR_THROW): 0.18,
-            int(PatternID.COUNTER_RUSH): 0.10,
+            int(PatternID.COUNTER_RUSH): 0.10, int(PatternID.YELLOW_BURST): 0.12,
         },
         int(PhaseID.P2): {
             int(PatternID.TRIPLE_CLAW): 0.16, int(PatternID.EARTH_CRUSH): 0.14,
             int(PatternID.FRENZY_RUSH): 0.14, int(PatternID.PILLAR_THROW): 0.12,
             int(PatternID.COUNTER_RUSH): 0.08, int(PatternID.SPIN_SWEEP): 0.12,
             int(PatternID.BLOOD_ROAR): 0.10, int(PatternID.CRIMSON_BRAND): 0.08,
-            int(PatternID.STAGGER_LIFT): 0.06,
+            int(PatternID.YELLOW_BURST): 0.12,
         },
         int(PhaseID.P3): {
             int(PatternID.TRIPLE_CLAW): 0.14, int(PatternID.EARTH_CRUSH): 0.12,
             int(PatternID.FRENZY_RUSH): 0.14, int(PatternID.PILLAR_THROW): 0.10,
             int(PatternID.COUNTER_RUSH): 0.08, int(PatternID.SPIN_SWEEP): 0.12,
             int(PatternID.BLOOD_ROAR): 0.12, int(PatternID.CRIMSON_BRAND): 0.10,
-            int(PatternID.STAGGER_LIFT): 0.08,
+            int(PatternID.YELLOW_BURST): 0.12,
         },
     })
 
@@ -281,9 +299,35 @@ class RaidConfig:
     counter_range: float = 2.0                # 보스 표면 + 근접 판정 거리 (2.2→2.0)
     counter_fail_damage_scale: float = 1.5    # 실패 시 강화 돌진 배율
     counter_miss_cooldown_scale: float = 0.5  # 각도/거리 조건 밖 시도 시 쿨다운 절반만 적용(재시도 여지)
+    counter_facing_angle_deg: float = 60.0    # 성공 조건: 딜러가 보스를 바라봄(facing vs 보스방향 각차 ≤ 60°)
+    counter_success_grog_turns: int = 7       # 저지 성공 시 보스 그로기 7턴(2.1s) 보장
 
-    # ── 무력화 (스태거) ──
-    # 실시간(TURN=0.3s) 기준: 6턴=1.8초는 파티 협공에 촉박 → 10턴=3.0초.
+    # ── 패링 (딜러 G) — YELLOW_BURST(노란 확산 원) 파훼 ──
+    # 노란 원: 플레이어 편향 타겟 중심, 판정용 반경 3.0, telegraph 7턴(2.1s), 발동 대미지 55.
+    # 딜러가 마지막 parry_window_turns(2턴) 창에서 PARRY + 보스 바라봄(≤60°) + 원 안 → 무효 + 보스 그로기 4턴.
+    parry_radius: float = 3.0
+    parry_telegraph_turns: int = 7
+    parry_damage: int = 55
+    parry_window_turns: int = 2               # 발동 직전 몇 턴 안에 PARRY 를 눌러야 유효한가
+    parry_facing_angle_deg: float = 60.0
+    parry_success_grog_turns: int = 4
+    parry_fail_cooldown_scale: float = 0.5    # 조건 미달 PARRY 는 쿨 절반
+
+    # ── 무력화 (스태거) — 상시 게이지 신시스템 ──
+    # 게이지는 stagger_max 에서 시작해 스킬 명중마다 감소, 0 도달 → 보스 그로기(stagger_break_grog_turns)
+    # + stagger_break 이벤트 + 게이지 max 리셋. 그로기 중엔 게이지 감소 없음.
+    # stagger_values: 액션ID → 감소량(상=궁80/중=W30·카운터40/하=Q12·패링25·평타3).
+    stagger_max: float = 300.0
+    stagger_break_grog_turns: int = 8         # 무력화 파괴 시 딜타임 8턴(2.4s)
+    stagger_values: Dict[int, float] = field(default_factory=lambda: {
+        int(RaidActionID.ATTACK_BASIC): 3.0,   # 평타(딜러 라인샷 / 타 역할 근접)
+        int(RaidActionID.ATTACK_SKILL): 12.0,  # Q 혈창 / 타 역할 강공격
+        int(RaidActionID.SKILL_2): 30.0,       # W 혈월 낙하
+        int(RaidActionID.ULTIMATE): 80.0,      # R 궁극 '혈월 처형'
+        int(RaidActionID.PARRY): 25.0,         # 패링 성공
+        int(RaidActionID.COUNTER): 40.0,       # 카운터 성공
+    })
+    # (레거시 STAGGER_LIFT 패턴 참조용 — 풀에서 제거됐으나 코드 잔존)
     stagger_gauge: float = 200.0
     stagger_window_turns: int = 10
     stagger_contrib_basic: float = 12.0
@@ -336,8 +380,10 @@ class RaidConfig:
     # 기믹 보상
     rw_counter_success: float = 30.0
     rw_counter_fail: float = -15.0
-    rw_stagger_success: float = 40.0
-    rw_stagger_fail: float = -20.0
+    rw_parry_success: float = 30.0
+    rw_parry_fail: float = -8.0
+    rw_stagger_success: float = 40.0          # stagger_break(무력화 파괴) 보상
+    rw_stagger_fail: float = -20.0            # (레거시 — 상시 게이지 신시스템엔 미방출)
     rw_stagger_contribution: float = 0.3
     rw_brand_spread: float = 4.0
     rw_rush_pillar_lure: float = 15.0         # 돌진을 기둥으로 유도 성공
@@ -357,6 +403,7 @@ SKILL_KEYS: Dict[int, str] = {
     int(RaidActionID.COUNTER): "counter",        # 딜러 E
     int(RaidActionID.DASH): "dash",              # 딜러 대시 (회피 기동기)
     int(RaidActionID.ULTIMATE): "ult",           # 딜러 R 궁극 '혈월 처형'
+    int(RaidActionID.PARRY): "parry",            # 딜러 G 패링
     int(RaidActionID.TAUNT): "taunt",
     int(RaidActionID.GUARD): "guard",
     int(RaidActionID.HEAL): "heal",
@@ -379,19 +426,19 @@ ROLE_SKILLS: Dict[PartyRole, Tuple[int, int]] = {
 SKILL_BAR: Dict[PartyRole, Tuple[int, ...]] = {
     PartyRole.DEALER:  (int(RaidActionID.ATTACK_SKILL), int(RaidActionID.SKILL_2),
                         int(RaidActionID.COUNTER), int(RaidActionID.DASH),
-                        int(RaidActionID.ULTIMATE)),
+                        int(RaidActionID.ULTIMATE), int(RaidActionID.PARRY)),
     PartyRole.TANK:    (int(RaidActionID.TAUNT), int(RaidActionID.GUARD)),
     PartyRole.HEALER:  (int(RaidActionID.HEAL), int(RaidActionID.CLEANSE)),
     PartyRole.SUPPORT: (int(RaidActionID.BUFF_ATK), int(RaidActionID.BUFF_SHIELD)),
 }
 
 
-# 관측 벡터 블록 오프셋 (문서/디버그용) — 합계 128
+# 관측 벡터 블록 오프셋 (문서/디버그용) — 합계 132
 OBS_LAYOUT: List[Tuple[str, int]] = [
     ("self", 16),
     ("allies", 24),
     ("boss", 12),
-    ("pattern_channels", 40),   # 10 패턴 x 4 (active, turns_norm, am_I_target, in_danger_here)
+    ("pattern_channels", 44),   # 11 패턴 x 4 (active, turns_norm, am_I_target, in_danger_here)
     ("danger_sensor", 8),
     ("escape", 4),
     ("coop", 8),                # stagger(2) + seal_los(4) + counter(2)

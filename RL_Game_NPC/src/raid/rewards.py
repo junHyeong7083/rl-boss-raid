@@ -104,7 +104,11 @@ class RewardComputer:
                     r += cfg.rw_counter_success
                 elif t == "counter_fail":
                     r += cfg.rw_counter_fail
-                elif t == "stagger_success":
+                elif t == "parry_success":
+                    r += cfg.rw_parry_success
+                elif t == "parry_fail":
+                    r += cfg.rw_parry_fail
+                elif t == "stagger_break":
                     r += cfg.rw_stagger_success
                 elif t == "stagger_fail":
                     r += cfg.rw_stagger_fail

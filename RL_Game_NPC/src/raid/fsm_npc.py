@@ -95,8 +95,7 @@ class FSMNpcPolicy:
         for act, dx, dy in _DIRS:
             spd = u.move_speed * (0.7071 if dx and dy else 1.0)
             nx = u.x + dx * spd; ny = u.y + dy * spd
-            if not (u.radius <= nx <= env.config.map_width - u.radius and
-                    u.radius <= ny <= env.config.map_height - u.radius):
+            if not env._in_arena(nx, ny, u.radius):
                 continue
             if env._blocked_for_unit(u.uid, nx, ny):
                 continue
@@ -120,13 +119,19 @@ class FSMNpcPolicy:
     def _seal_hide(self, u) -> Optional[int]:
         env = self.env
         b = env.boss
-        if env._unit_hidden(u):
-            return int(RaidActionID.STAY)
-        # 가장 가까운 살아있는 기둥의 보스 반대편으로 이동
+        # 순차 기둥 폭발 대응: 파티 전원이 "끝까지 살아남는 기둥"(시계방향 파괴 순서의 꼬리)로
+        # 합류하도록 공용 목표를 잡는다. env._seal_explode_next_pillar 은 각도 내림차순 첫 생존자를
+        # 파괴하므로, 내림차순 정렬의 뒤에서부터 첫 생존 기둥이 최종 생존자.
         pillars = [p for p in env.pillars if p.alive]
         if not pillars:
             return int(RaidActionID.STAY)
-        p = min(pillars, key=lambda p: _euclid(u.x, u.y, p.x, p.y))
+        cx, cy = env.config.arena_center
+        order = sorted(env.pillars, key=lambda q: math.atan2(q.y - cy, q.x - cx), reverse=True)
+        survivor = next((q for q in reversed(order) if q.alive), pillars[0])
+        # 이미 최종 생존 기둥 뒤에 은신 중이면 유지
+        if env._unit_hidden(u) and _euclid(u.x, u.y, survivor.x, survivor.y) <= survivor.radius + 1.6:
+            return int(RaidActionID.STAY)
+        p = survivor
         dirx = p.x - b.x; diry = p.y - b.y
         d = math.hypot(dirx, diry) or 1.0
         tx = p.x + dirx / d * (p.radius + 0.5)
@@ -146,7 +151,7 @@ class FSMNpcPolicy:
                 orbit_r = p.radius + u.radius + 0.45
                 tx = p.x + math.cos(ang_u + step) * orbit_r
                 ty = p.y + math.sin(ang_u + step) * orbit_r
-        return self._move_toward(u, tx, ty)
+        return self._move_toward_avoiding(u, tx, ty)
 
     def _counter_action(self, u) -> int:
         env = self.env
@@ -195,6 +200,37 @@ class FSMNpcPolicy:
 
     def _move_toward(self, u, tx, ty) -> int:
         return self._dir_action(tx - u.x, ty - u.y)
+
+    def _move_toward_avoiding(self, u, tx, ty) -> int:
+        """직진 방향이 비차단이면 그대로, 장애물(보스/기둥)에 막히면 8방향 중 목표에
+        가장 가까워지는 비차단 방향으로 우회. (보스가 진행 방향에 딱 붙어 유닛을 벽으로
+        미는 상황 — 전멸기 은신 합류 등 — 에서 제자리걸음 방지.)"""
+        env = self.env
+        direct = self._move_toward(u, tx, ty)
+
+        def _cell(act):
+            for a, dx, dy in _DIRS:
+                if int(a) == int(act):
+                    spd = u.move_speed * (0.7071 if dx and dy else 1.0)
+                    return u.x + dx * spd, u.y + dy * spd
+            return u.x, u.y
+
+        nx, ny = _cell(direct)
+        if env._in_arena(nx, ny, u.radius) and not env._blocked_for_unit(u.uid, nx, ny):
+            return direct
+        # 직진 차단 → 목표에 가장 가까워지는 비차단 우회 방향
+        best = None; bestd = math.hypot(u.x - tx, u.y - ty)
+        for act, dx, dy in _DIRS:
+            spd = u.move_speed * (0.7071 if dx and dy else 1.0)
+            cx = u.x + dx * spd; cy = u.y + dy * spd
+            if not env._in_arena(cx, cy, u.radius):
+                continue
+            if env._blocked_for_unit(u.uid, cx, cy):
+                continue
+            d = math.hypot(cx - tx, cy - ty)
+            if d < bestd:
+                bestd = d; best = act
+        return int(best) if best is not None else direct
 
     def _move_away(self, u, tx, ty) -> int:
         return self._dir_action(u.x - tx, u.y - ty)

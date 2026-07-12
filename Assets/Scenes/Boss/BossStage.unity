@@ -2378,14 +2378,6 @@ MonoBehaviour:
     range: 9
     aoeRadius: 4
     maxCooldown: 200
-  - label: "\uAE30\uBCF8\uACF5\uACA9"
-    key: 32
-    actionId: 9
-    cooldownKey:
-    aimed: 1
-    range: 5
-    aoeRadius: 1.2
-    maxCooldown: 0
   groundY: 0
   reachThreshold: 0.6
   enablePrediction: 1

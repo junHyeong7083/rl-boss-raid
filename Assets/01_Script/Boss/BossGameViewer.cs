@@ -67,6 +67,18 @@ namespace BossRaid
         private bool[] _pillarAlivePrev;       // 직전 프레임 alive 상태 (파괴 감지)
         private bool _pillarRefsReady;
 
+        [Header("V2 Arena Boundary (arena_radius)")]
+        [Tooltip("아레나 중심 sim 좌표(BossArenaBuilder Center=(10,10) 기준). 경계 링/축소 표현의 원점.")]
+        public Vector2 arenaCenterSim = new Vector2(10f, 10f);
+        [Tooltip("경계 링 기본 테두리 색(HDR 흰-금). 축소가 없을 때의 차분한 테두리.")]
+        public Color arenaRingColor = new Color(1.9f, 1.75f, 1.0f, 1f);
+        [Tooltip("아레나 축소 순간 경고 색(HDR 주황-적).")]
+        public Color arenaShrinkWarn = new Color(3.0f, 0.9f, 0.2f, 1f);
+        private GameObject _arenaRing;
+        private Material _arenaRingMat;
+        private float _arenaLastRadius = -1f;   // 직전 유효 반경(축소 감지)
+        private float _arenaShrinkPulse = 0f;   // 1→0 감쇠(축소 직후 경고 펄스)
+
         /// <summary>BossController에서 가장 가까운 유닛 위치 조회용.</summary>
         public bool TryGetNearestUnitPosition(Vector3 from, out Vector3 pos)
         {
@@ -115,6 +127,15 @@ namespace BossRaid
             {
                 _latestSnap = snap;
                 ApplySnapshot(snap);
+            }
+
+            // 아레나 축소 경고 펄스 감쇠 + 링 색/펄스 반영
+            if (_arenaRingMat != null && _arenaShrinkPulse > 0f)
+            {
+                _arenaShrinkPulse = Mathf.MoveTowards(_arenaShrinkPulse, 0f, Time.deltaTime * 1.2f);
+                Color ring = Color.Lerp(arenaRingColor, arenaShrinkWarn, _arenaShrinkPulse);
+                _arenaRingMat.SetColor("_OutlineColor", ring);
+                _arenaRingMat.SetFloat("_Pulse", _arenaShrinkPulse > 0.15f ? 1f : 0f);
             }
 
             // Lerp 보간은 각 컴포넌트의 Update에서
@@ -203,6 +224,9 @@ namespace BossRaid
             // V2: 기둥 동기화 (alive → SetActive, 파괴 순간 이벤트)
             SyncPillars(snap.pillars);
 
+            // 원형 아레나 경계 링 갱신(축소 감지 → 펄스)
+            if (snap.boss != null) UpdateArenaBoundary(snap.boss.arena_radius);
+
             // 공유 계약: 스냅샷 적용 완료 통지
             OnSnapshotApplied?.Invoke(snap);
         }
@@ -274,6 +298,85 @@ namespace BossRaid
             }
         }
 
+        // ─────────────── V2 원형 아레나 경계 링 ───────────────
+
+        /// <summary>
+        /// arena_radius(sim)를 경계 링으로 유지·갱신. 값이 줄면(축소) 경고 펄스를 켠다.
+        /// 링은 Telegraph circle(_Fill=0, 얇은 흰-금 테두리)로 "여기까지"를 항상 표시.
+        /// </summary>
+        private void UpdateArenaBoundary(float radiusSim)
+        {
+            if (radiusSim <= 0.01f)
+            {
+                if (_arenaRing != null && _arenaRing.activeSelf) _arenaRing.SetActive(false);
+                return;
+            }
+            EnsureArenaRing();
+            _arenaRing.SetActive(true);
+
+            var center = ContinuousToWorld(arenaCenterSim.x, arenaCenterSim.y) + Vector3.up * 0.03f;
+            _arenaRing.transform.position = center;
+            float diam = radiusSim * 2f * cellSize;
+            _arenaRing.transform.localScale = new Vector3(diam, diam, diam);
+
+            // 축소 감지: 이전 반경보다 눈에 띄게 작아지면 경고 펄스 무장 + 링 웨이브 1회.
+            if (_arenaLastRadius > 0f && radiusSim < _arenaLastRadius - 0.05f)
+            {
+                _arenaShrinkPulse = 1f;
+                _arenaRingMat.SetColor("_OutlineColor", arenaShrinkWarn);
+                _arenaRingMat.SetFloat("_Pulse", 1f);
+            }
+            _arenaLastRadius = radiusSim;
+        }
+
+        /// <summary>바닥(XZ)에 눕힌 흰-금 경계 링(Telegraph circle, _Fill=0 → 테두리만).</summary>
+        private void EnsureArenaRing()
+        {
+            if (_arenaRing != null) return;
+
+            var go = new GameObject("ArenaBoundaryRing");
+            go.transform.SetParent(transform, false);
+            go.transform.rotation = Quaternion.Euler(90f, 0f, 0f);   // 바닥에 평평히
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+            var mesh = new Mesh { name = "ArenaRingQuad" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, -0.5f, 0f), new Vector3(0.5f, -0.5f, 0f),
+                new Vector3( 0.5f,  0.5f, 0f), new Vector3(-0.5f,  0.5f, 0f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(1f, 1f), new Vector2(0f, 1f),
+            };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+            mf.sharedMesh = mesh;
+
+            var sh = Shader.Find("BossRaid/Telegraph");
+            if (sh == null) sh = Shader.Find("Sprites/Default");
+            _arenaRingMat = new Material(sh);
+            if (sh != null && sh.name == "BossRaid/Telegraph")
+            {
+                _arenaRingMat.SetInt("_ShapeType", 0);        // circle
+                _arenaRingMat.SetFloat("_Fill", 0f);           // 테두리만(내부 미채움)
+                _arenaRingMat.SetFloat("_Progress", 1f);
+                _arenaRingMat.SetFloat("_Pulse", 0f);
+                _arenaRingMat.SetFloat("_OutlineWidth", 0.02f);// 얇은 테두리
+                _arenaRingMat.SetFloat("_UnfilledAlpha", 0f);  // 내부 투명 → 순수 링
+                _arenaRingMat.SetColor("_Color", new Color(1f, 0.95f, 0.7f, 0.25f));
+                _arenaRingMat.SetColor("_OutlineColor", arenaRingColor);
+            }
+            else _arenaRingMat.color = arenaRingColor;
+
+            mr.sharedMaterial = _arenaRingMat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            _arenaRing = go;
+        }
+
         // ─────────────── 텔레그래프 렌더 (유클리드 기하 도형) ───────────────
 
         /// <summary>
@@ -317,6 +420,7 @@ namespace BossRaid
             switch (shape.kind)
             {
                 case "circle":
+                case "parry":   // 패링 확산 원: 기하는 circle 과 동일(cx,cy,r), 색/펄스만 TileMarker 가 노랑 처리
                 {
                     tr.position = ContinuousToWorld(shape.cx, shape.cy) + Vector3.up * 0.02f;
                     float d = shape.r * 2f * cellSize;

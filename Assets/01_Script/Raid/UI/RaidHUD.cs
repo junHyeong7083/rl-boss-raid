@@ -139,8 +139,8 @@ namespace BossRaid
         [Header("Boss")]
         [Tooltip("상단 보스 이름 표기")]
         public string bossName = "혈월의 마수 군주";
-        [Tooltip("무력화 게이지 최대치 (stagger_gauge/max)")]
-        public float staggerMax = 200f;
+        [Tooltip("무력화 게이지 최대치 폴백 — 스냅샷 boss.stagger_max 미파싱 시 사용")]
+        public float staggerMax = 300f;
 
         [Header("Boss HP 멀티 레이어 (로스트아크식 x100 줄 바)")]
         [Tooltip("전체 HP를 몇 줄로 나눌지 (x100 표기 기준)")]
@@ -188,9 +188,12 @@ namespace BossRaid
         private bool _hpReady;          // 첫 스냅샷 수신 여부
         private bool _resetSnap;        // 리셋/회복 감지 → 잔상 즉시 스냅
 
-        private GameObject _staggerRoot;
+        // 무력화(스태거) 바 — 보스 HP 바 아래 상시 표시(감소형), fill 은 셰이더 머티리얼
+        private Image _staggerFillImg;
         private RectTransform _staggerFill;
         private Text _staggerText;
+        private bool _staggerGroggy;
+        private Material _staggerMat;
 
         // 하위 컴포넌트
         private PartyFrameUI _party;
@@ -359,23 +362,20 @@ namespace BossRaid
             RaidUIFactory.Stretch(_hpText.rectTransform, 0f, 0f, 0f, 0f);
             _hpText.fontStyle = FontStyle.Bold;
 
-            // 무력화(스태거) 게이지 — 보스 바 아래, 기본 숨김
-            var stg = RaidUIFactory.NewImage("StaggerRoot", panel.transform, new Color(0, 0, 0, 0));
-            RaidUIFactory.Place(stg.rectTransform,
-                new Vector2(0.5f, 0f), new Vector2(0.5f, 1f),
-                new Vector2(0f, -4f), new Vector2(560f, 20f));
-            _staggerRoot = stg.gameObject;
-
-            RaidUIFactory.NewBar("StaggerBar", stg.transform,
-                new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
-                Vector2.zero, new Vector2(560f, 18f),
+            // ── 무력화(스태거) 게이지 — 보스 HP 바 바로 아래, 상시 표시(감소형) ──
+            // bg(트랙)은 일반 어두운 이미지, fill 만 신규 UI 셰이더 머티리얼로 광택/펄스/글로우 연출.
+            _staggerFillImg = RaidUIFactory.NewBar("StaggerBar", panel.transform,
+                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -88f), new Vector2(560f, 14f),
                 RaidUIFactory.BorderWhite, RaidUIFactory.TrackDark, RaidUIFactory.Purple,
                 out _staggerFill);
+            _staggerFillImg.material = GetStaggerMaterial();
 
-            _staggerText = RaidUIFactory.NewText("StaggerText", stg.transform, _font, 13, Color.white, TextAnchor.MiddleCenter);
-            RaidUIFactory.Stretch(_staggerText.rectTransform, 0f, 0f, 0f, 0f);
-
-            _staggerRoot.SetActive(false);
+            // 중앙 텍스트(바 위에 겹침) — 평상시 "무력화 N/M", 그로기 중 "무력화!! 딜 타임" 펄스
+            _staggerText = RaidUIFactory.NewText("StaggerText", panel.transform, _font, 13, Color.white, TextAnchor.MiddleCenter);
+            RaidUIFactory.Place(_staggerText.rectTransform,
+                new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
+                new Vector2(0f, -88f), new Vector2(560f, 14f));
         }
 
         // ─────────────── 스냅샷 반영 ───────────────
@@ -422,16 +422,126 @@ namespace BossRaid
                 }
             }
 
-            // 무력화 게이지
-            bool stagger = b.stagger_active;
-            if (_staggerRoot != null) _staggerRoot.SetActive(stagger);
-            if (stagger)
+            // 무력화 게이지 (상시 표시, 감소형) — 평상/임박/그로기 상태머신
+            UpdateStagger(b);
+        }
+
+        // ─────────────── 무력화(스태거) 바 ───────────────
+        // 상태: 평상(≥30%) → 임박(<30%, 보라→자홍) → 그로기(stagger_active, 금색-보라 GROGGY).
+        // 게이지는 감소형(스킬 맞출수록 줄어듦). fill = stagger_gauge / stagger_max.
+
+        private static readonly Color StgPurple  = new Color(0.58f, 0.28f, 0.85f, 1f); // 평상 보라
+        private static readonly Color StgMagenta = new Color(1.00f, 0.18f, 0.62f, 1f); // 임박 밝은 자홍
+        private static readonly Color StgGroggy  = new Color(0.95f, 0.62f, 0.55f, 1f); // 그로기 금색-보라
+        private const float StgImminentThresh = 0.30f;                                 // 임박 진입 비율
+
+        private static readonly int FlowIntensityId = Shader.PropertyToID("_FlowIntensity");
+        private static readonly int PulseSpeedId    = Shader.PropertyToID("_PulseSpeed");
+        private static readonly int PulseAmpId       = Shader.PropertyToID("_PulseAmp");
+        private static readonly int GlowColorId      = Shader.PropertyToID("_GlowColor");
+
+        // stagger_max 는 파서(다른 에이전트 담당)가 추가 예정 — 리플렉션으로 안전 소비, 없으면 폴백.
+        private static System.Reflection.FieldInfo _staggerMaxField;
+        private static bool _staggerMaxResolved;
+
+        private float ResolveStaggerMax(BossData b)
+        {
+            if (!_staggerMaxResolved)
             {
-                float g = Mathf.Clamp01(b.stagger_gauge / Mathf.Max(1f, staggerMax));
-                RaidUIFactory.SetFill(_staggerFill, g);
-                if (_staggerText != null)
-                    _staggerText.text = $"무력화  {b.stagger_gauge:0} / {staggerMax:0}";
+                _staggerMaxField = typeof(BossData).GetField("stagger_max");
+                _staggerMaxResolved = true;
             }
+            if (_staggerMaxField != null && b != null)
+            {
+                try
+                {
+                    float m = System.Convert.ToSingle(_staggerMaxField.GetValue(b));
+                    if (m > 0.5f) return m;
+                }
+                catch { /* 타입 불일치 등 → 인스펙터 폴백 */ }
+            }
+            return staggerMax; // 인스펙터 기본(300) 폴백
+        }
+
+        private Material GetStaggerMaterial()
+        {
+            if (_staggerMat != null) return _staggerMat;
+            var sh = Shader.Find("BossRaid/StaggerBar");
+            if (sh == null) sh = Shader.Find("UI/Default"); // 폴백
+            _staggerMat = new Material(sh) { name = "StaggerBar_RT" };
+            return _staggerMat;
+        }
+
+        private void UpdateStagger(BossData b)
+        {
+            if (_staggerFillImg == null) return;
+
+            float max = ResolveStaggerMax(b);
+            float ratio = Mathf.Clamp01(b.stagger_gauge / Mathf.Max(1f, max));
+            _staggerGroggy = b.stagger_active;
+
+            var mat = _staggerFillImg.material;
+
+            if (_staggerGroggy)
+            {
+                // 그로기(딜 타임): 가득 찬 금색-보라 + 강한 펄스/광택 + 금색 HDR 글로우
+                RaidUIFactory.SetFill(_staggerFill, 1f);
+                _staggerFillImg.color = StgGroggy;
+                if (mat != null)
+                {
+                    mat.SetFloat(FlowIntensityId, 0.85f);
+                    mat.SetFloat(PulseSpeedId, 9f);
+                    mat.SetFloat(PulseAmpId, 0.28f);
+                    mat.SetColor(GlowColorId, new Color(1.5f, 1.05f, 0.45f, 1f)); // HDR 금색
+                }
+            }
+            else
+            {
+                RaidUIFactory.SetFill(_staggerFill, ratio);
+                // 30% 미만이면 보라→밝은 자홍으로 리프트(곧 터진다 신호). t: 0(임계치)→1(0%)
+                float t = (ratio < StgImminentThresh)
+                    ? 1f - Mathf.Clamp01(ratio / StgImminentThresh)
+                    : 0f;
+                _staggerFillImg.color = Color.Lerp(StgPurple, StgMagenta, t);
+                if (mat != null)
+                {
+                    mat.SetFloat(FlowIntensityId, Mathf.Lerp(0.25f, 0.60f, t));
+                    mat.SetFloat(PulseSpeedId, Mathf.Lerp(2f, 6f, t));
+                    mat.SetFloat(PulseAmpId, Mathf.Lerp(0.05f, 0.16f, t));
+                    mat.SetColor(GlowColorId, Color.clear);
+                }
+            }
+
+            if (_staggerText != null)
+            {
+                _staggerText.text = _staggerGroggy
+                    ? "무력화!!  딜 타임"
+                    : $"무력화  {b.stagger_gauge:0} / {max:0}";
+                _staggerText.fontStyle = _staggerGroggy ? FontStyle.Bold : FontStyle.Normal;
+            }
+        }
+
+        // 그로기 중 중앙 텍스트 펄스(밝기/스케일) — 매 프레임.
+        private void UpdateStaggerPulse()
+        {
+            if (_staggerText == null) return;
+            if (_staggerGroggy)
+            {
+                float p = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * 8f);
+                _staggerText.color = Color.Lerp(RaidUIFactory.Gold, Color.white, p);
+                float s = 1f + 0.06f * p;
+                _staggerText.rectTransform.localScale = new Vector3(s, s, 1f);
+            }
+            else if (_staggerText.rectTransform.localScale.x != 1f)
+            {
+                _staggerText.color = Color.white;
+                _staggerText.rectTransform.localScale = Vector3.one;
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (_staggerMat != null) Destroy(_staggerMat);
         }
 
         // ─────────────── 매 프레임 HP 바 보간/렌더 ───────────────
@@ -439,6 +549,8 @@ namespace BossRaid
 
         private void Update()
         {
+            UpdateStaggerPulse();
+
             if (!_hpReady) return;
 
             float dt = Time.deltaTime;

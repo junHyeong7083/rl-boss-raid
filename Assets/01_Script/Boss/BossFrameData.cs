@@ -56,7 +56,13 @@ namespace BossRaid
 
         // ── 돌진/카운터 연출 필드 ──
         // type=="counter_miss": 카운터 실패 사유. "angle"(정면이 아니다) | "range"(너무 멀다).
+        // type=="parry_fail":  패링 실패 사유(FloatingText 미배선 — 타 소유).
         public string reason;
+
+        // ── 기둥 순차 폭발 필드 — type=="pillar_explode" 전용 ──
+        // 전멸기 중 파괴되는 기둥 위치(sim 좌표 → ContinuousToWorld 변환).
+        public float x;
+        public float y;
     }
 
     [Serializable]
@@ -85,6 +91,10 @@ namespace BossRaid
         // ── 돌진 표식 필드 (RushMarkView 소비) ──
         public int rush_target;         // 돌진 조준 대상 uid (-1=비활성)
         public int rush_left;           // 남은 windup 턴 (표식 조임 진행도 계산)
+
+        // ── 원형 아레나 / 무력화 게이지 ──
+        public float arena_radius;      // 현재 유효 아레나 반경(sim). 0/미제공이면 경계 렌더 생략.
+        public int stagger_max;         // 무력화 게이지 최대치(HUD 용, 상시 제공)
     }
 
     [Serializable]
@@ -177,6 +187,7 @@ namespace BossRaid
         CounterRush  = 7,   // 카운터 돌진 (장판 없음, 파란 발광)
         StaggerLift  = 8,   // 무력화 (장판 없음)
         SealWipe     = 9,   // 전멸기 혈월 강림 (시네마틱)
+        YellowBurst  = 10,  // 패링 확산 원 (kind=="parry" — 노란 장판, "지금 G!")
     }
 
     public enum PartyRole

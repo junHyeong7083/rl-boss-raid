@@ -26,6 +26,7 @@ namespace BossRaid
         public Color counterRushColor  = new Color(0.2f,  0.5f,  1.0f,  0.9f);   // 7 COUNTER_RUSH: 파랑
         public Color staggerLiftColor  = new Color(0.2f,  0.85f, 1.0f,  0.85f);  // 8 STAGGER_LIFT: 시안
         public Color sealWipeColor     = new Color(0.6f,  0.0f,  0.15f, 0.95f);  // 9 SEAL_WIPE: 혈월 암적
+        public Color yellowBurstColor  = new Color(1.0f,  0.85f, 0.10f, 0.95f);  // 10 YELLOW_BURST(패링): HDR 노랑
         public Color rimColor          = new Color(1.0f,  1.0f,  0.7f,  1.0f);   // 림 글로우: 밝은 노랑 (legacy)
 
         [Header("Fill / Outline — 로스트아크 장판")]
@@ -61,6 +62,7 @@ namespace BossRaid
             3,   // 7 COUNTER_RUSH (창 3)
             6,   // 8 STAGGER_LIFT (창 6)
             12,  // 9 SEAL_WIPE    (wind_up 12)
+            7,   // 10 YELLOW_BURST(패링 텔레그래프 7턴)
         };
         // 표/스냅샷 모두 없을 때: 처음 관측된 잔여턴을 total로 캐싱
         private int _cachedPattern = -1;
@@ -69,6 +71,9 @@ namespace BossRaid
         // ApplyShape에서 세팅한 shape 종류(0=circle 1=fan 2=line 3=cross 4=donut).
         // 도넛(내부 안전)은 대비 강화를 적용하지 않고, 일반 장판만 위험 대비를 올린다.
         private int _lastShapeType = 0;
+
+        // 패링 장판(kind=="parry"): 노란 확산 원. 붉은 위험과 구분되는 노랑 + 마지막 2턴 강펄스("지금 G!").
+        private bool _isParry = false;
 
         private Material EnsureMat()
         {
@@ -109,10 +114,12 @@ namespace BossRaid
             float fanHalf = 0.785f;
             float safeMask = 0f;
             float donutInner = 0.4f;
+            _isParry = false;
 
             switch (shape.kind)
             {
                 case "circle": shapeType = 0; break;
+                case "parry":  shapeType = 0; _isParry = true; break;   // 패링 확산 원(원 도형 + 노란 처리)
                 case "fan":    shapeType = 1; fanHalf = Mathf.Max(0.01f, shape.width * 0.5f); break;
                 case "line":   shapeType = 2; break;
                 case "cross":  shapeType = 3; safeMask = shape.safe_mask; break;
@@ -158,19 +165,26 @@ namespace BossRaid
             // 턴당 증분(1/total)을 turnSeconds 동안 이동하도록 속도 설정
             _fillSpeed = (1f / Mathf.Max(1, total)) / Mathf.Max(0.01f, turnSeconds);
 
+            // 패링 장판은 붉은 위험과 구분되는 HDR 노랑으로 강제.
+            if (_isParry) baseCol = yellowBurstColor;
+
             // 테두리 HDR 색 = 패턴 색 × 강도 (블룸용). 알파는 1로 고정.
             // 일반 장판(도넛 외)은 위험 대비 강화: 진행도(fill)가 오를수록 테두리 대비를 소폭 상향
             // (발동 임박일수록 테두리가 더 강하게 튀도록). 도넛은 내부가 안전이라 대비를 올리지 않음.
+            // 패링은 "차오름"이 곧 타이밍이라 대비를 더 크게 올려 마지막에 테두리가 확 튄다.
             bool isDonut = _lastShapeType == 4;
-            float contrast = isDonut ? 1f : Mathf.Lerp(1f, 1.25f, fill);
+            float contrast = isDonut ? 1f : Mathf.Lerp(1f, _isParry ? 1.6f : 1.25f, fill);
             Color outCol = baseCol * (outlineIntensity * contrast);
             outCol.a = 1f;
+
+            // 패링 펄스: 마지막 2턴(≤2)에 강펄스로 "지금 G!"를 읽히게. 일반 장판은 기존대로 ≤1.
+            int pulseThreshold = _isParry ? 2 : 1;
 
             m.SetColor("_Color", baseCol);
             m.SetColor("_RimColor", rimColor);
             m.SetColor("_OutlineColor", outCol);
             m.SetFloat("_Progress", fill);                                   // 진행도 = 채움과 동일
-            m.SetFloat("_Pulse", turnsRemaining <= 1 ? 1f : 0f);            // 잔여 1턴 이하 깜빡임
+            m.SetFloat("_Pulse", turnsRemaining <= pulseThreshold ? 1f : 0f); // 임박 시 강한 깜빡임
             m.SetFloat("_Fill", _currentFill);                              // Update에서 목표까지 보간
 
             if (debugLog)
@@ -212,6 +226,7 @@ namespace BossRaid
                 case RaidPatternId.CounterRush:  return counterRushColor;
                 case RaidPatternId.StaggerLift:  return staggerLiftColor;
                 case RaidPatternId.SealWipe:     return sealWipeColor;
+                case RaidPatternId.YellowBurst:  return yellowBurstColor;
                 default: return Color.white;
             }
         }

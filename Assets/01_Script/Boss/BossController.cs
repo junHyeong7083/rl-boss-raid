@@ -69,6 +69,10 @@ namespace BossRaid
         public Color critFlashColor = new Color(1f, 0.3f, 0.25f);
         [Tooltip("그로기/스턴 중 파르스름 이미시브 틴트")]
         public Color groggyTint = new Color(0.45f, 0.7f, 1.15f);
+        [Tooltip("카운터 창 동안 몸 전체 파란 이미시브 틴트(그로기보다 우선). HDR 강조.")]
+        public Color counterGlowColor = new Color(0.2f, 0.55f, 1.2f);
+        [Tooltip("카운터 파란 틴트 이미시브 배수(체감 강화용).")]
+        public float counterGlowIntensity = 3.5f;
         [Tooltip("무력화(그로기 진입) 성공 순간 보라 플래시 색")]
         public Color staggerFlashColor = new Color(0.7f, 0.35f, 1f);
 
@@ -225,22 +229,17 @@ namespace BossRaid
 
         private bool _counterGlowOn;
 
-        /// <summary>카운터 창 동안 bodyRenderers에 파란 이미시브 틴트. 종료 시 원복.</summary>
+        /// <summary>
+        /// 카운터 창 동안 몸 전체 파란 이미시브 틴트. MPB 지속 상태 경로로 통합해
+        /// 우선순위(카운터 파랑 > 그로기 > 기본)를 보장한다. 종료 시 원복.
+        /// (기존 material 직접 쓰기 방식은 groggy MPB 에 덮여 파랑이 안 보이던 문제 수정)
+        /// </summary>
         private void ApplyCounterGlow(bool on)
         {
             if (_counterGlowOn == on) return;   // 상태 변화 시에만 갱신
             _counterGlowOn = on;
-            if (bodyRenderers == null) return;
-
-            Color emis = on ? new Color(0.15f, 0.45f, 1.0f) * 3.0f : Color.black;
-            foreach (var r in bodyRenderers)
-            {
-                if (r == null) continue;
-                var m = r.material;
-                if (m == null || !m.HasProperty("_EmissionColor")) continue;
-                if (on) m.EnableKeyword("_EMISSION");
-                m.SetColor("_EmissionColor", emis);
-            }
+            EnsureBossEmission();
+            if (_bossFlashCo == null) RestoreBossPersistent();   // 플래시 중이면 종료 시 반영됨
         }
 
         // ─────────────── 피격 플래시 / 그로기 틴트 (MPB) ───────────────
@@ -299,18 +298,22 @@ namespace BossRaid
             RestoreBossPersistent();
         }
 
-        /// <summary>플래시 종료/틴트 변경 시 지속 상태 반영: 그로기면 파르스름, 아니면 MPB 제거(카운터 발광 등 머티리얼 값 노출).</summary>
+        /// <summary>플래시 종료/틴트 변경 시 지속 상태 반영. 우선순위: 카운터 파랑 > 그로기 파르스름 > 기본(MPB 제거).</summary>
         private void RestoreBossPersistent()
         {
             if (bodyRenderers == null) return;
-            if (_grogTintActive)
+            if (_counterGlowOn)
+            {
+                SetBossEmission(counterGlowColor * counterGlowIntensity);   // 카운터 최우선
+            }
+            else if (_grogTintActive)
             {
                 SetBossEmission(groggyTint * 0.9f);
             }
             else
             {
                 foreach (var r in bodyRenderers)
-                    if (r != null) r.SetPropertyBlock(null);   // MPB 이미시브 override 제거
+                    if (r != null) r.SetPropertyBlock(null);   // MPB 이미시브 override 제거 → 기본
             }
         }
 

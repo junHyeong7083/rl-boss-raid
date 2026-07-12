@@ -34,6 +34,7 @@ namespace BossRaid
         private static readonly Color COrange    = new Color(1.00f, 0.55f, 0.16f);
         private static readonly Color CCrimson   = new Color(0.85f, 0.06f, 0.12f);
         private static readonly Color CGold      = new Color(1.00f, 0.82f, 0.25f);
+        private static readonly Color CYellow    = new Color(1.00f, 0.88f, 0.15f);   // 패링 노랑
         private static readonly Color CSilver    = new Color(0.90f, 0.94f, 1.00f);   // 평타 은백
         private static readonly Color CGreen     = new Color(0.35f, 1.00f, 0.45f);   // 힐 초록
         private static readonly Color CBuffAtk   = new Color(1.00f, 0.42f, 0.42f);   // 공버프 붉은기
@@ -175,6 +176,44 @@ namespace BossRaid
                         ProceduralVFX.Debris(bossPos, CBrown);
                         HitStopManager.HitStop(0.12f);
                         LostArkCamera.ShakeCamera(0.7f, 0.3f);
+                        break;
+                    }
+                    case "parry_success":
+                    {
+                        // 패링 성공 "지금 막았다!" — 노란 대형 링 + 금색 버스트 + 짧은 슬로모(0.15s).
+                        ProceduralVFX.RingWave(bossPos, CYellow, 7f, 0.5f);        // 노란 대형 링
+                        ProceduralVFX.RingWave(bossPos, CGold, 4.2f, 0.4f);        // 금색 이중 링
+                        ProceduralVFX.Burst(bossPos, CGold, 60, 11f, 0.6f, 0.55f); // 금색 버스트
+                        ProceduralVFX.Burst(bossPos, CYellow, 32, 7f, 0.45f, 0.45f);
+                        HitStopManager.HitStop(0.15f, 0.15f);                      // 슬로모 0.15s(15% 속도)
+                        LostArkCamera.ShakeCamera(0.5f, 0.25f);
+                        Flash(CGold, 0.2f);                                        // 짧은 금색 섬광
+                        break;
+                    }
+                    case "parry_fail":
+                    {
+                        // 조용(연출 없음). 실패 사유(ev.reason) FloatingText 는 타 소유 → 미배선.
+                        break;
+                    }
+                    case "pillar_explode":
+                    {
+                        // 전멸기 중 기둥 순차 폭발("다음 기둥으로!"): 대형 붉은-회색 폭발 + 파편 + 링 + 셰이크 0.3.
+                        Vector3 pp = ToWorld(ev.x, ev.y);
+                        ProceduralVFX.Burst(pp, CRed, 54, 10f, 0.62f, 0.6f);       // 붉은 코어 폭발
+                        ProceduralVFX.Burst(pp, CGray, 30, 7f, 0.5f, 0.75f);       // 회색 잔해 연기
+                        ProceduralVFX.Debris(pp, CBrown);                          // 돌 파편
+                        ProceduralVFX.RingWave(pp, CRed, 5.5f, 0.5f);              // 충격 링
+                        LostArkCamera.ShakeCamera(0.6f, 0.3f);                     // 셰이크 0.3
+                        HitStopManager.HitStop(0.1f);
+                        break;
+                    }
+                    case "stagger_break":
+                    {
+                        // 무력화 게이지 파괴(그로기 돌입 신호): 보라 링 + 버스트로 "지금 딜!" 강조.
+                        ProceduralVFX.RingWave(bossPos, CPurple, 4.5f, 0.45f);
+                        ProceduralVFX.Burst(bossPos + Vector3.up * 1.0f, CPurple, 34, 7f, 0.45f, 0.5f);
+                        HitStopManager.HitStop(0.12f);
+                        LostArkCamera.ShakeCamera(0.45f, 0.28f);
                         break;
                     }
                     case "stagger_success":

@@ -263,6 +263,27 @@ class CrimsonBrand(PatternDef):
         ]
 
 
+class YellowBurst(PatternDef):
+    """노란 확산 원 — 패링(딜러 G) 파훼 기믹.
+
+    플레이어 편향 타겟 중심에 판정용 반경 parry_radius 원을 고정(시전 시점 타겟 위치).
+    반경 0→3.0 확산 연출은 Unity 몫. telegraph parry_telegraph_turns(7=2.1s), kind="parry".
+    발동 시 원 안 유닛에 parry_damage(55). 단 딜러가 마지막 창에서 PARRY + 보스 바라봄 +
+    원 안이면 무효 + 보스 그로기(env._impact_parry 처리).
+    """
+    def __init__(self):
+        super().__init__(PatternID.YELLOW_BURST, "YellowBurst", cooldown=8)
+
+    def build(self, cfg, rng, ctx, target_uid):
+        party = ctx.get("party", {})
+        tp = party.get(target_uid, ctx.get("boss_pos", (10.0, 10.0)))
+        shp = RelShape("circle", {"cx": tp[0], "cy": tp[1], "r": cfg.parry_radius}, world=True)
+        return [
+            PatternStep(cfg.parry_telegraph_turns, [shp], cfg.parry_damage, "burst",
+                        kind="parry", extra={"target_uid": target_uid}),
+        ]
+
+
 # step-기반 패턴 레지스트리
 PATTERN_REGISTRY: Dict[PatternID, PatternDef] = {
     PatternID.TRIPLE_CLAW: TripleClaw(),
@@ -272,6 +293,7 @@ PATTERN_REGISTRY: Dict[PatternID, PatternDef] = {
     PatternID.SPIN_SWEEP: SpinSweep(),
     PatternID.BLOOD_ROAR: BloodRoar(),
     PatternID.CRIMSON_BRAND: CrimsonBrand(),
+    PatternID.YELLOW_BURST: YellowBurst(),
 }
 
 # 보스-상태 기믹 (step 시퀀스 없이 boss.py 에서 구동)

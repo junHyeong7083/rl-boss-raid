@@ -54,6 +54,21 @@ namespace BossRaid
         private static readonly Color ColBuff      = new Color(0.55f, 0.80f, 0.95f, 1f); // 버프(하늘색)
         private static readonly Color ColGuard     = new Color(0.45f, 0.62f, 0.95f, 1f); // 가드(파랑)
         private static readonly Color ColMiss      = new Color(1.00f, 0.30f, 0.25f, 1f); // 카운터 실패(붉은)
+        private static readonly Color ColPlayerSkill = new Color(1.00f, 0.85f, 0.45f, 1f); // 플레이어 스킬명(금색)
+
+        /// <summary>플레이어 스킬 id → 표시명. (player_skill_cast 이벤트의 skill_id)</summary>
+        private static string PlayerSkillName(string skillId)
+        {
+            switch (skillId)
+            {
+                case "basic":  return "기본공격";
+                case "skill":  return "혈창 투척!";
+                case "skill2": return "혈월 낙하!";
+                case "ult":    return "혈월 처형!!";
+                case "parry":  return "가드!";
+                default:       return skillId;
+            }
+        }
 
         // ── 카운터 실패 플로터(붉은 소형, 짧게) ──
         private const float MissLife = 0.7f;
@@ -148,6 +163,20 @@ namespace BossRaid
                         SpawnMissLabel(ev.uid, msg, snap);
                         continue;
                     }
+
+                    // ── 플레이어 스킬명 플로터: 유저가 뭘 썼는지 머리 위에 표기 ──
+                    case "player_skill_cast":
+                        if (ev.uid == 0)
+                            SpawnSkillLabel(0, PlayerSkillName(ev.skill_id), ColPlayerSkill, snap);
+                        continue;
+                    case "dash":
+                        if (ev.uid == 0)
+                            SpawnSkillLabel(0, "대시!", ColPlayerSkill, snap);
+                        continue;
+                    case "counter_success":
+                        if (ev.uid == 0)
+                            SpawnSkillLabel(0, "카운터!", ColGuard, snap);
+                        continue;
                 }
 
                 if (ev.type != "damage" && ev.type != "damage_taken" && ev.type != "heal") continue;
