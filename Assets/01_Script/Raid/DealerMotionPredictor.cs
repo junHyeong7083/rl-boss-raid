@@ -86,6 +86,8 @@ namespace BossRaid
         private Vector3 _dashGlideDir;  // 대시 활강 방향(단위)
         private float _dashGlideRemain; // 대시 활강 잔여 거리(월드)
         private float _dashGlideSpeed;  // 대시 활강 속도(월드/초)
+        private bool _holdAtDest;       // 도착 핀 고정 중(표시 위치를 목적지에 고정)
+        private Vector3 _holdWorldPos;  // 핀 고정 목적지(월드)
         private float _castFaceHold;    // 시전 방향 고정 잔여(초)
         private BossGameViewer _viewer; // 예측 표시 위치의 경계/기둥 클램프용(스냅샷 조회)
 
@@ -129,12 +131,28 @@ namespace BossRaid
                 _turnBoosting = true;
 
             _castFaceHold = 0f;          // 새 이동 클릭 = 시전 방향 고정 해제(이동 회전이 되찾음)
+            _holdAtDest = false;         // 도착 핀도 해제(새 목적지로 출발)
             _intentDir = newDir;
             _hasIntent = true;
         }
 
         /// <summary>이동 의도 해제(목표 도달/정지). 오프셋은 지수 감쇠로 0 수렴.</summary>
         public void ClearMoveIntent() => _hasIntent = false;
+
+        /// <summary>
+        /// 도착 핀 고정: 표시 위치를 목적지(worldPos)에 고정하고, 서버가 다가오는 동안
+        /// 오프셋이 자연 소멸하게 한다(감쇠로 뒤로 끌려가는 프레임 제거). 서버 도착 시 자동 해제.
+        /// </summary>
+        public void HoldAtDestination(Vector3 worldPos)
+        {
+            _holdWorldPos = worldPos;
+            _holdAtDest = true;
+            _hasIntent = false;
+            _turnBoosting = false;
+        }
+
+        /// <summary>도착 핀 해제(새 목적지/취소).</summary>
+        public void ReleaseHold() => _holdAtDest = false;
 
         /// <summary>
         /// 대시 즉발 임펄스: 오프셋에 방향×거리를 즉시 가산해 화면이 먼저 훅 나가게 한다.
@@ -254,6 +272,15 @@ namespace BossRaid
                 _offset += _dashGlideDir * step;
                 _dashGlideRemain -= step;
                 _offset = Vector3.ClampMagnitude(_offset, maxOff);
+            }
+            else if (_holdAtDest)
+            {
+                // 도착 핀: 표시 위치 = 목적지 고정. 서버(auth)가 다가올수록 오프셋이 저절로 줄고,
+                // 충분히 가까워지면 해제 — 감쇠로 뒤로 끌려가는 프레임이 원천적으로 없다.
+                Vector3 want = _holdWorldPos - auth;
+                want.y = 0f;
+                if (want.magnitude <= 0.06f) { _offset = want; _holdAtDest = false; }
+                else _offset = Vector3.ClampMagnitude(want, maxOff);
             }
             else if (_hasIntent)
             {

@@ -170,6 +170,7 @@ namespace BossRaid
         private bool _hasDestination;                 // 목표 지점 활성 여부
         private Vector3 _destination;                 // 월드 목표 지점
         private bool _skipMoveThisTurn;               // 스킬을 쐈으니 이번 턴 이동 전송 스킵
+        private bool _awaitServerArrival;             // 표시 도착 후 서버 도착 대기(표시 위치 핀 고정 중)
         private bool _wasMoving;                       // 직전에 이동 명령을 보내고 있었는지(도달 STOP 판정용)
         private bool _snapshotSubscribed;
         private UnitData _dealerData;                 // 최신 스냅샷의 딜러 유닛(쿨다운 조회용)
@@ -292,6 +293,8 @@ namespace BossRaid
                     _hasDestination = false; _wasMoving = false; _lastSentMoveAction = -1;
                     moveMarker?.HideImmediate();
                 }
+                _awaitServerArrival = false;
+                _predictor?.ReleaseHold();
                 _predictor?.ClearMoveIntent();
                 if (_aiming != null) CancelAiming();
                 ResetInputBuffers();
@@ -698,6 +701,9 @@ namespace BossRaid
             _destination = pt;
             _hasDestination = true;
 
+            // 새 목적지 = 서버 도착 대기(핀) 해제하고 일반 이동 흐름으로 복귀.
+            if (_awaitServerArrival) { _awaitServerArrival = false; _predictor?.ReleaseHold(); }
+
             // 최초 클릭이면 마커 애니메이션 재생, 드래그 중이면 위치만 갱신.
             if (pressedThisFrame) moveMarker?.Show(pt);
             else moveMarker?.MoveTo(pt);
@@ -726,6 +732,19 @@ namespace BossRaid
         private void SendMoveIfNeeded()
         {
             if (!_hasDestination) return;
+
+            // 서버 도착 대기(핀 고정 중): 서버 스냅샷 위치 기준으로 목적지 도달을 판정하고,
+            // 도달 전까지 이동을 계속 전송(예측 의도 없이 — 표시 위치는 핀에 고정돼 있음).
+            if (_awaitServerArrival)
+            {
+                if (_dealerData == null) return;
+                Vector2 destSim = WorldToSim(_destination);
+                Vector2 sd = new Vector2(destSim.x - _dealerData.x, destSim.y - _dealerData.y);
+                if (sd.magnitude <= reachThreshold) FinishArrival();
+                else SendMoveRaw(QuantizeToEightDir(sd));
+                return;
+            }
+
             if (!TryGetDealerDisplayPos(out var cur)) return;
 
             Vector2 delta = new Vector2(_destination.x - cur.x, _destination.z - cur.z);
@@ -748,18 +767,39 @@ namespace BossRaid
             _predictor?.SetMoveIntent(DirForAction(action));
         }
 
-        /// <summary>도달: 마커 즉시 숨김 + 목표/의도 해제. 이동 중이었다면 STAY 1회로 확실히 정지.</summary>
+        /// <summary>
+        /// 표시(예측) 위치 도달: 마커 숨김 + 표시 위치를 목적지에 핀 고정하고 "서버 도착 대기"로 전환.
+        /// 여기서 곧바로 STAY 를 보내면 서버가 ~1칸 못 미친 곳에 멈추고 예측 오프셋이 감쇠하며
+        /// 캐릭터가 뒤로 끌려갔다 — 서버가 목적지에 실제로 도착할 때까지 이동을 계속 보낸다.
+        /// </summary>
         private void HandleArrival()
         {
+            if (_awaitServerArrival) return;
+            _awaitServerArrival = true;
+            moveMarker?.HideImmediate();
+            _predictor?.HoldAtDestination(new Vector3(_destination.x, 0f, _destination.z));
+        }
+
+        /// <summary>서버 도착 확정: STAY 전송 + 목표/핀 해제.</summary>
+        private void FinishArrival()
+        {
+            _awaitServerArrival = false;
             _hasDestination = false;
             _lastSentMoveAction = -1;
-            moveMarker?.HideImmediate();
-            _predictor?.ClearMoveIntent();
+            _predictor?.ReleaseHold();
             if (_wasMoving)
             {
                 RaidSession.Instance?.SendAction((int)BossActionId.Stay);
                 _wasMoving = false;
             }
+        }
+
+        /// <summary>예측 의도 없이 서버만 유도하는 이동 전송(도착 핀 고정 중 사용).</summary>
+        private void SendMoveRaw(int action)
+        {
+            RaidSession.Instance?.SendAction(action);
+            _lastSentMoveAction = action;
+            _wasMoving = true;
         }
 
         /// <summary>딜러 표시 위치(예측 활성 시 예측 포함, 아니면 서버 렌더 위치).</summary>
