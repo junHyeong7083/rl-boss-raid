@@ -390,7 +390,10 @@ namespace BossRaid
             // 궤도 속도 → 수직축 회전(나선).
             var vel = ps.velocityOverLifetime;
             vel.enabled = true;
+            // orbital 세 축도 모드 일치 필요("curves must all be in the same mode" 방지) — 전부 Constant.
+            vel.orbitalX = new ParticleSystem.MinMaxCurve(0f);
             vel.orbitalY = new ParticleSystem.MinMaxCurve(3.2f);
+            vel.orbitalZ = new ParticleSystem.MinMaxCurve(0f);
 
             ApplyFadeAndShrink(ps, 0.5f, 0.4f);
 

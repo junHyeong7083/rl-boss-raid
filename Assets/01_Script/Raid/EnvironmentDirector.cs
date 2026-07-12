@@ -485,8 +485,11 @@ namespace BossRaid
             var vel = ps.velocityOverLifetime;
             vel.enabled = true;
             vel.space = ParticleSystemSimulationSpace.Local;
+            // x/y/z 세 축의 MinMaxCurve 모드가 다르면 Unity 가 "Particle Velocity curves must
+            // all be in the same mode" 에러를 낸다 — z 도 같은 TwoConstants 모드로 반드시 지정.
             vel.x = new ParticleSystem.MinMaxCurve(-0.08f, 0.08f);
             vel.y = new ParticleSystem.MinMaxCurve(-0.04f, 0.06f);
+            vel.z = new ParticleSystem.MinMaxCurve(-0.08f, 0.08f);
 
             ApplyFadeInOut(ps);
 
