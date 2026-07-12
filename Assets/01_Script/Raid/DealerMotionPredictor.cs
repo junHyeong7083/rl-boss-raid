@@ -58,6 +58,12 @@ namespace BossRaid
         [Tooltip("대시 임펄스 후 오프셋 상한 특례 지속(초). 이 창 동안 오프셋 상한이 대시 거리까지 확대되고, "
                + "큰 오차 스냅/감쇠가 억제되어 화면이 먼저 훅 나간 뒤 서버가 스냅샷으로 자연히 따라온다.")]
         public float dashOffsetWindow = 0.5f;
+        [Tooltip("대시 활강 시간(초). 임펄스를 한 프레임 점프(텔레포트 체감)가 아니라 이 시간에 걸쳐 고속 이동.")]
+        public float dashGlideTime = 0.12f;
+
+        [Header("시전 방향")]
+        [Tooltip("스킬/평타/대시 발동 시 그 방향을 즉시 바라보고 이 시간 동안 고정(이동 회전보다 우선).")]
+        public float castFaceHoldTime = 0.25f;
 
         [Header("방향 전환")]
         [Tooltip("이동 의도 방향이 이전과 이 각도(도) 이상 달라지면 기존 오프셋의 '새 방향 수직 성분'을 즉시 감쇠(미끄러지는 관성 제거).")]
@@ -77,10 +83,16 @@ namespace BossRaid
         private float _dashWindowRemain;// 대시 특례 남은 시간(초, >0 이면 특례 적용 중)
         private bool _reconcile;        // 보정 모드: 큰 오차 시 즉시 스냅 대신 LateUpdate 에서 오프셋을 0 으로 지수 수렴
         private bool _turnBoosting;     // intent 설정 직후 급회전 부스트 진행 중(목표 도달 시 해제)
+        private Vector3 _dashGlideDir;  // 대시 활강 방향(단위)
+        private float _dashGlideRemain; // 대시 활강 잔여 거리(월드)
+        private float _dashGlideSpeed;  // 대시 활강 속도(월드/초)
+        private float _castFaceHold;    // 시전 방향 고정 잔여(초)
+        private BossGameViewer _viewer; // 예측 표시 위치의 경계/기둥 클램프용(스냅샷 조회)
 
         private void Awake()
         {
             _unitView = GetComponent<UnitView>();   // 딜러 UnitView 와 동일 GameObject 에 부착됨
+            _viewer = FindFirstObjectByType<BossGameViewer>();
         }
 
         /// <summary>현재 표시(예측 포함) 위치. 마커 도달 판정 등에 사용.</summary>
@@ -116,6 +128,7 @@ namespace BossRaid
             if (alignFacingToIntent && Vector3.Angle(transform.forward, newDir) > 5f)
                 _turnBoosting = true;
 
+            _castFaceHold = 0f;          // 새 이동 클릭 = 시전 방향 고정 해제(이동 회전이 되찾음)
             _intentDir = newDir;
             _hasIntent = true;
         }
@@ -139,9 +152,26 @@ namespace BossRaid
             _dashWindowRemain = dashOffsetWindow;
             _reconcile = false;                                     // 대시 특례가 보정 모드보다 우선
 
-            _offset += worldDir.normalized * distanceWorld;          // 즉시 가산 → 선행 이동
-            _offset = Vector3.ClampMagnitude(_offset, _dashMaxOffset);
+            // 즉시 가산(한 프레임 점프 = 텔레포트 체감)이 아니라 dashGlideTime 에 걸친 고속 활강.
+            _dashGlideDir = worldDir.normalized;
+            _dashGlideRemain = distanceWorld;
+            _dashGlideSpeed = distanceWorld / Mathf.Max(0.02f, dashGlideTime);
+            FaceCast(_dashGlideDir);                                 // 대시 방향 즉시 바라보기
             _hasDisplay = true;
+        }
+
+        /// <summary>
+        /// 시전 방향 즉시 전환: 스킬/평타/대시 발동 순간 캐릭터가 그 방향을 즉시 본다.
+        /// castFaceHoldTime 동안 회전을 고정(이동 의도 회전보다 우선). 새 이동 클릭이 오면 해제.
+        /// </summary>
+        public void FaceCast(Vector3 worldDir)
+        {
+            worldDir.y = 0f;
+            if (worldDir.sqrMagnitude < 1e-6f) return;
+            transform.rotation = Quaternion.LookRotation(worldDir.normalized, Vector3.up);
+            _castFaceHold = castFaceHoldTime;
+            _turnBoosting = false;
+            if (_unitView != null) _unitView.ExternalRotationOwner = true;
         }
 
         /// <summary>현재 유효 오프셋 상한: 대시 창 중이면 특례 상한, 아니면 기본 maxOffset.</summary>
@@ -216,6 +246,15 @@ namespace BossRaid
                 _offset *= k;
                 if (_offset.sqrMagnitude < 1e-6f) { _offset = Vector3.zero; _reconcile = false; }   // 수렴 완료 → 해제
             }
+            else if (_dashGlideRemain > 0f)
+            {
+                // 대시 활강: 잔여 거리를 dashGlideSpeed 로 소화(한 프레임 점프 금지 — 텔레포트 체감 제거).
+                // 히트스톱과 무관하게 실시간 진행(unscaled).
+                float step = Mathf.Min(_dashGlideRemain, _dashGlideSpeed * Time.unscaledDeltaTime);
+                _offset += _dashGlideDir * step;
+                _dashGlideRemain -= step;
+                _offset = Vector3.ClampMagnitude(_offset, maxOff);
+            }
             else if (_hasIntent)
             {
                 _offset += _intentDir * (moveSpeed * Time.deltaTime);
@@ -234,6 +273,15 @@ namespace BossRaid
             }
 
             _displayPos = auth + _offset;
+
+            // 예측 표시 위치를 아레나 원형 경계/기둥/보스에 클램프 — 예측이 벽을 뚫고 들어갔다가
+            // 서버 거부로 고무줄처럼 당겨지는 '벽 근처 순간이동' 체감 제거. 클램프 후 오프셋 재동기화.
+            if (ClampDisplayToWorld(ref _displayPos))
+            {
+                _offset = _displayPos - auth;
+                _offset.y = 0f;
+            }
+
             _hasDisplay = true;
             transform.position = _displayPos;
 
@@ -241,24 +289,97 @@ namespace BossRaid
             // intent 활성 동안 회전 소유권을 예측기가 가진다(UnitView 의 이동/보스 바라보기 Slerp 스킵)
             // → 이중 슬럽 경합 제거. 기존 오프셋 게이트(_offset.sqrMagnitude>0.01)를 제거해,
             // 오프셋이 아직 쌓이기 전(클릭 직후)에도 즉시 회전이 선점되도록 한다.
-            bool ownRotation = alignFacingToIntent && active && _hasIntent;
+            if (_castFaceHold > 0f) _castFaceHold -= Time.unscaledDeltaTime;
+
+            bool ownRotation = alignFacingToIntent && active && (_hasIntent || _castFaceHold > 0f);
             if (_unitView != null) _unitView.ExternalRotationOwner = ownRotation;
             if (ownRotation)
             {
-                var rot = Quaternion.LookRotation(_intentDir, Vector3.up);
-                if (_turnBoosting)
+                if (_castFaceHold > 0f)
                 {
-                    // 클릭 직후 첫 프레임: 900°/s 급으로 확 돌려 "돌고 나서 간다" 체감.
-                    transform.rotation = Quaternion.RotateTowards(transform.rotation, rot, facingSnapDegPerSec * Time.deltaTime);
-                    if (Quaternion.Angle(transform.rotation, rot) < 1f) _turnBoosting = false;   // 도달 → 부스트 종료
+                    // 시전 방향 고정 중: FaceCast 가 이미 즉시 회전시켰다 — 유지만 한다.
                 }
                 else
                 {
-                    // 회전 선점 이후: 강슬럽으로 방향 추종(방향 급전환에도 빠르게 재정렬).
-                    transform.rotation = Quaternion.Slerp(transform.rotation, rot, Time.deltaTime * facingLerpSpeed);
+                    var rot = Quaternion.LookRotation(_intentDir, Vector3.up);
+                    if (_turnBoosting)
+                    {
+                        // 클릭 직후 첫 프레임: 900°/s 급으로 확 돌려 "돌고 나서 간다" 체감.
+                        transform.rotation = Quaternion.RotateTowards(transform.rotation, rot, facingSnapDegPerSec * Time.deltaTime);
+                        if (Quaternion.Angle(transform.rotation, rot) < 1f) _turnBoosting = false;   // 도달 → 부스트 종료
+                    }
+                    else
+                    {
+                        // 회전 선점 이후: 강슬럽으로 방향 추종(방향 급전환에도 빠르게 재정렬).
+                        transform.rotation = Quaternion.Slerp(transform.rotation, rot, Time.deltaTime * facingLerpSpeed);
+                    }
                 }
             }
             else _turnBoosting = false;
+        }
+
+        /// <summary>
+        /// 예측 표시 위치를 씬 충돌 지오메트리(원형 아레나 경계/살아있는 기둥/보스 몸통)에 클램프.
+        /// 서버 판정과 동일 기하를 클라에서 미러링해 예측 과주행(rubber-band)을 원천 차단한다.
+        /// </summary>
+        /// <returns>클램프로 위치가 바뀌었으면 true.</returns>
+        private bool ClampDisplayToWorld(ref Vector3 pos)
+        {
+            var snap = _viewer != null ? _viewer.LatestSnapshot : null;
+            if (snap == null || snap.boss == null) return false;
+
+            float cell = _viewer.cellSize;
+            bool changed = false;
+            const float unitR = 0.3f;   // 서버 딜러 radius
+
+            // 1) 원형 아레나 경계(축소 포함)
+            float arenaR = snap.boss.arena_radius;
+            if (arenaR > 0.1f)
+            {
+                Vector3 center = _viewer.ContinuousToWorld(_viewer.arenaCenterSim.x, _viewer.arenaCenterSim.y);
+                Vector3 d = pos - center; d.y = 0f;
+                float lim = (arenaR - unitR) * cell;
+                if (d.magnitude > lim)
+                {
+                    Vector3 c = center + d.normalized * lim;
+                    pos = new Vector3(c.x, pos.y, c.z);
+                    changed = true;
+                }
+            }
+
+            // 2) 살아있는 기둥 밖으로
+            if (snap.pillars != null)
+            {
+                foreach (var p in snap.pillars)
+                {
+                    if (p == null || !p.alive) continue;
+                    Vector3 pc = _viewer.ContinuousToWorld(p.x, p.y);
+                    Vector3 d = pos - pc; d.y = 0f;
+                    float lim = (p.radius + unitR - 0.05f) * cell;
+                    if (d.magnitude < lim)
+                    {
+                        Vector3 dir = d.sqrMagnitude > 1e-6f ? d.normalized : Vector3.right;
+                        Vector3 c = pc + dir * lim;
+                        pos = new Vector3(c.x, pos.y, c.z);
+                        changed = true;
+                    }
+                }
+            }
+
+            // 3) 보스 몸통 밖으로
+            {
+                Vector3 bc = _viewer.ContinuousToWorld(snap.boss.x, snap.boss.y);
+                Vector3 d = pos - bc; d.y = 0f;
+                float lim = (snap.boss.radius + unitR - 0.05f) * cell;
+                if (lim > 0f && d.magnitude < lim)
+                {
+                    Vector3 dir = d.sqrMagnitude > 1e-6f ? d.normalized : Vector3.right;
+                    Vector3 c = bc + dir * lim;
+                    pos = new Vector3(c.x, pos.y, c.z);
+                    changed = true;
+                }
+            }
+            return changed;
         }
 
         // 예측기 비활성/파괴 시 회전 소유권을 UnitView 에 되돌려준다(플래그 고착 방지).

@@ -505,6 +505,11 @@ namespace BossRaid
             RaidSession.Instance?.SendActionAimed(sk.actionId, sim.x, sim.y);
             skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
+
+            // 시전 방향 즉시 바라보기(서버 facing 과 시각 일치 — "쓴 방향으로 즉시 전환").
+            if (_predictor != null && TryGetDealerDisplayPos(out var castFrom))
+                _predictor.FaceCast(worldPoint - castFrom);
+
             CancelAiming();
         }
 
@@ -623,6 +628,10 @@ namespace BossRaid
             RaidSession.Instance?.SendActionAimed(basicAttackActionId, sim.x, sim.y);
             _lastBasicAttackTime = Time.unscaledTime;
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 평타는 쿨 없음 → 예측 쿨 미설정.
+
+            // 평타도 쏜 방향을 즉시 바라본다(시전 방향 즉시 전환).
+            if (_predictor != null && TryGetDealerDisplayPos(out var castFrom))
+                _predictor.FaceCast(pt - castFrom);
         }
 
         // ─────────────── 패링 (G, 즉발) ───────────────
