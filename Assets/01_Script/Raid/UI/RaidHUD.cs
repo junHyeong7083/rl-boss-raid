@@ -194,6 +194,7 @@ namespace BossRaid
         private Text _staggerText;
         private bool _staggerGroggy;
         private Material _staggerMat;
+        private Material _hpFillMat;    // 보스 HP fill 광택 머티리얼(무력화 바와 동일 셰이더, 은은한 파라미터)
 
         // 하위 컴포넌트
         private PartyFrameUI _party;
@@ -349,6 +350,9 @@ namespace BossRaid
             _hpFillImg = RaidUIFactory.NewImage("Fill", _hpTrackImg.transform, RaidUIFactory.CrimsonHot);
             RaidUIFactory.SetFill(_hpFillImg.rectTransform, 1f);
             _hpFill = _hpFillImg.rectTransform;
+            // 보스 HP fill 도 무력화 바와 같은 광택 셰이더(색은 기존 레이어 팔레트 = 정점 컬러 그대로).
+            var hpMat = GetHpFillMaterial();
+            if (hpMat != null) _hpFillImg.material = hpMat;
 
             // 큰 "xNN" 줄 수 표기 — 바 좌측(금색, Bold)
             _countText = RaidUIFactory.NewText("BossHpCount", _hpTrackImg.transform, _font, 28, RaidUIFactory.Gold, TextAnchor.MiddleLeft);
@@ -469,7 +473,25 @@ namespace BossRaid
             var sh = Shader.Find("BossRaid/StaggerBar");
             if (sh == null) sh = Shader.Find("UI/Default"); // 폴백
             _staggerMat = new Material(sh) { name = "StaggerBar_RT" };
+            // 사용자 피드백(2026-07-13): 흐름 속도는 셰이더 기본의 0.5배가 적당.
+            if (_staggerMat.HasProperty("_FlowSpeed"))
+                _staggerMat.SetFloat("_FlowSpeed", _staggerMat.GetFloat("_FlowSpeed") * 0.5f);
             return _staggerMat;
+        }
+
+        /// <summary>보스 HP fill 용 셰이더 머티리얼 — 무력화 바와 같은 광택 계열, 더 은은하게.</summary>
+        private Material GetHpFillMaterial()
+        {
+            if (_hpFillMat != null) return _hpFillMat;
+            var sh = Shader.Find("BossRaid/StaggerBar");
+            if (sh == null) return null;   // 폴백: 머티리얼 미적용(일반 Image)
+            _hpFillMat = new Material(sh) { name = "BossHpFill_RT" };
+            // HP 바는 정보가 주인공 — 광택은 은은하게, 흐름 속도 0.5배(사용자 피드백).
+            if (_hpFillMat.HasProperty("_FlowSpeed"))
+                _hpFillMat.SetFloat("_FlowSpeed", _hpFillMat.GetFloat("_FlowSpeed") * 0.5f);
+            if (_hpFillMat.HasProperty("_FlowIntensity")) _hpFillMat.SetFloat("_FlowIntensity", 0.18f);
+            if (_hpFillMat.HasProperty("_PulseAmp"))      _hpFillMat.SetFloat("_PulseAmp", 0.03f);
+            return _hpFillMat;
         }
 
         private void UpdateStagger(BossData b)
@@ -542,6 +564,7 @@ namespace BossRaid
         private void OnDestroy()
         {
             if (_staggerMat != null) Destroy(_staggerMat);
+            if (_hpFillMat != null) Destroy(_hpFillMat);
         }
 
         // ─────────────── 매 프레임 HP 바 보간/렌더 ───────────────

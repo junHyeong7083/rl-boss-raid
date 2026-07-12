@@ -590,9 +590,9 @@ namespace BossRaid
         private void BuildTitle(Transform root)
         {
             _titleGroup = MakePanel("TitleGroup", root, PanelDark);
-            MakeText("Title", _titleGroup.transform, "혈월의 마수 군주", 120, Crimson,
+            MakeText("Title", _titleGroup.transform, "강화학습용 보스 레이드", 120, Crimson,
                 new Vector2(0.5f, 0.66f), new Vector2(1400, 200), FontStyle.Bold);
-            MakeText("Subtitle", _titleGroup.transform, "혈월 강림 — 마수 군주 토벌전", 34, Gold,
+            MakeText("Subtitle", _titleGroup.transform, "보스레이드 — 테스트", 34, Gold,
                 new Vector2(0.5f, 0.55f), new Vector2(1200, 60), FontStyle.Normal);
             MakeButton("StartBtn", _titleGroup.transform, "게임 시작", Gold,
                 new Vector2(0.5f, 0.36f), OnClickStart);
