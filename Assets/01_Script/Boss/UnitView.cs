@@ -55,6 +55,8 @@ namespace BossRaid
         private Vector3 _lastShownPos;        // 직전 프레임 최종 표시 위치(예측 포함) — IsMoving 판정용
         private bool _shownPosInit;
         private bool _isMovingAnim;           // 히스테리시스 적용된 달리기 애니 상태
+        private GameObject _shieldAura;       // 실드 버프 지속 오라(절차 폴백)
+        private GameObject _atkAura;          // 공버프 지속 오라(절차 폴백)
         private bool _aliveKnown;             // 생존 상태를 한 번이라도 받았는지
         private Vector3 _authPos;             // 예측 오염 없는 권위 보간 위치(transform.position 과 분리)
 
@@ -177,9 +179,12 @@ namespace BossRaid
             }
             if (hpBarRoot != null) hpBarRoot.SetActive(u.alive);
 
-            // 상태 효과
+            // 상태 효과 — 버프는 시전 "동작"이 아니라 캐릭터에 붙는 "지속 상태"로 표현한다.
+            // 프리팹에 전용 이펙트 자식이 있으면 그것을 토글, 없으면 절차 루프 오라를 부착/해제.
             if (shieldEffect) shieldEffect.SetActive(u.buff_shield > 0);
+            else ToggleBuffAura(ref _shieldAura, u.buff_shield > 0, new Color(0.42f, 0.72f, 1.00f));
             if (buffAtkEffect) buffAtkEffect.SetActive(u.buff_atk > 0);
+            else ToggleBuffAura(ref _atkAura, u.buff_atk > 0, new Color(1.00f, 0.42f, 0.42f));
 
             // 사망/부활 전환 처리 (다시하기로 부활 시 Dead/deathEffect 원복이 없던 버그 수정).
             // 매 스냅샷 SetBool 남발을 막기 위해 생존 상태가 "바뀔 때만" 적용한다.
@@ -233,18 +238,31 @@ namespace BossRaid
             if (HasParam(name)) animator.SetBool(name, v);
         }
 
-        /// <summary>Python에서 발생한 이벤트에 맞춰 애니메이션 트리거.</summary>
+        /// <summary>Python에서 발생한 이벤트에 맞춰 애니메이션 트리거.
+        /// 힐/버프/도발은 시전 "동작" 애니메이션을 재생하지 않는다(컨트롤러가 공격 클립을
+        /// 재활용해 어색했음) — 파티클(스파클/나선/링) + 지속 오라 + 머리 위 텍스트가 담당.</summary>
         public void OnEvent(EventData ev)
         {
             if (animator == null || ev == null || string.IsNullOrEmpty(ev.type)) return;
             switch (ev.type)
             {
                 case "damage":       SafeSetTrigger(trigAttack); break;
-                case "heal":         SafeSetTrigger(trigHeal); break;
-                case "taunt":        SafeSetTrigger(trigTaunt); break;
-                case "buff":         SafeSetTrigger(trigBuff); break;
                 case "damage_taken": SafeSetTrigger(trigHit); FlashHit(); break;
                 case "death":        SafeSetBool(paramDead, true); break;
+            }
+        }
+
+        /// <summary>버프 지속 상태 오라 부착/해제 (프리팹 전용 이펙트가 없을 때의 절차 폴백).</summary>
+        private void ToggleBuffAura(ref GameObject aura, bool on, Color color)
+        {
+            if (on)
+            {
+                if (aura == null) aura = ProceduralVFX.Aura(transform, color);
+            }
+            else if (aura != null)
+            {
+                Destroy(aura);
+                aura = null;
             }
         }
 
