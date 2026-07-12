@@ -36,18 +36,23 @@ namespace BossRaid
         public float moveSpeed = 3.0f;
         [Tooltip("예측 오프셋 상한(유닛). 서버보다 1턴 이상 앞서가지 않게.")]
         public float maxOffset = 1.2f;
-        [Tooltip("스냅샷 보정 시 이 오차(유닛) 이상이면 '보정 모드'(즉시 스냅 대신 지수 수렴). 서버 이동 거부 대응.")]
-        public float snapErrorThreshold = 2.6f;
-        [Tooltip("이 오차(유닛) 이상이면 진짜 순간이동(에피소드 리셋/텔레포트)으로 보고 즉시 스냅(오프셋 0).")]
-        public float hardSnapThreshold = 3.0f;
+        [Tooltip("스냅샷 보정 시 이 오차(유닛) 이상이면 '보정 모드'(즉시 스냅 대신 지수 수렴). 서버 이동 거부 대응. "
+               + "순간이동 근절: 대시+이동 한 턴 점프(≈3.5)를 스냅 아닌 보정으로 수용하도록 2.6→3.2 상향.")]
+        public float snapErrorThreshold = 3.2f;
+        [Tooltip("이 오차(유닛) 이상이면 진짜 순간이동(에피소드 리셋/텔레포트)으로 보고 즉시 스냅(오프셋 0). "
+               + "순간이동 근절: 진짜 리셋(거리 5+)만 스냅하도록 3.0→4.2 상향.")]
+        public float hardSnapThreshold = 4.2f;
         [Tooltip("보정 모드 오프셋→0 지수 수렴 시간 상수(초). 순간이동 체감 제거용.")]
         public float reconcileTime = 0.12f;
         [Tooltip("의도 해제 시 오프셋 지수 감쇠 시간 상수(초).")]
         public float decayTime = 0.15f;
-        [Tooltip("예측 중 이동 의도 방향으로 몸 방향 보정(후향 달리기 아티팩트 방지).")]
+        [Tooltip("예측 중 이동 의도 방향으로 몸 방향 보정(후향 달리기 아티팩트 방지 + 회전 우선 이동).")]
         public bool alignFacingToIntent = true;
-        [Tooltip("몸 방향 보정 Slerp 속도.")]
-        public float facingLerpSpeed = 12f;
+        [Tooltip("몸 방향 보정 정상 Slerp 속도(회전 선점 이후 추종). 12→22 상향으로 회전 우선 체감 강화.")]
+        public float facingLerpSpeed = 22f;
+        [Tooltip("intent 설정 직후 첫 회전 급가속 각속도(도/초). '클릭하면 먼저 돌고 나서 간다' 체감 — "
+               + "부스트 동안 Slerp 대신 이 각속도로 RotateTowards 하여 목표 방향에 즉시 도달.")]
+        public float facingSnapDegPerSec = 900f;
 
         [Header("Dash 특례")]
         [Tooltip("대시 임펄스 후 오프셋 상한 특례 지속(초). 이 창 동안 오프셋 상한이 대시 거리까지 확대되고, "
@@ -71,6 +76,7 @@ namespace BossRaid
         private float _dashMaxOffset;   // 대시 특례 오프셋 상한(월드) — 창 동안만 유효
         private float _dashWindowRemain;// 대시 특례 남은 시간(초, >0 이면 특례 적용 중)
         private bool _reconcile;        // 보정 모드: 큰 오차 시 즉시 스냅 대신 LateUpdate 에서 오프셋을 0 으로 지수 수렴
+        private bool _turnBoosting;     // intent 설정 직후 급회전 부스트 진행 중(목표 도달 시 해제)
 
         private void Awake()
         {
@@ -103,6 +109,12 @@ namespace BossRaid
                     _offset -= perp * Mathf.Clamp01(turnPerpDamp);        // 즉시 60% 제거
                 }
             }
+
+            // 회전 우선 이동: 새 의도가 현재 몸 방향과 벌어져 있으면 급회전 부스트를 켠다
+            // (LateUpdate 에서 facingSnapDegPerSec 각속도로 즉시 돌린 뒤 이동 추종).
+            // 각도가 이미 작으면(직진 유지) 부스트가 첫 프레임에 자연히 종료되어 무해하다.
+            if (alignFacingToIntent && Vector3.Angle(transform.forward, newDir) > 5f)
+                _turnBoosting = true;
 
             _intentDir = newDir;
             _hasIntent = true;
@@ -225,13 +237,35 @@ namespace BossRaid
             _hasDisplay = true;
             transform.position = _displayPos;
 
-            // 예측 중 몸 방향 보정: UnitView 는 (권위위치 − 표시위치) 기준으로 방향을 잡아
-            // 예측 오프셋만큼 후향으로 보일 수 있음 → 의도 방향으로 부드럽게 재정렬.
-            if (alignFacingToIntent && active && _hasIntent && _offset.sqrMagnitude > 0.01f)
+            // ─── 회전 우선 이동 ───
+            // intent 활성 동안 회전 소유권을 예측기가 가진다(UnitView 의 이동/보스 바라보기 Slerp 스킵)
+            // → 이중 슬럽 경합 제거. 기존 오프셋 게이트(_offset.sqrMagnitude>0.01)를 제거해,
+            // 오프셋이 아직 쌓이기 전(클릭 직후)에도 즉시 회전이 선점되도록 한다.
+            bool ownRotation = alignFacingToIntent && active && _hasIntent;
+            if (_unitView != null) _unitView.ExternalRotationOwner = ownRotation;
+            if (ownRotation)
             {
                 var rot = Quaternion.LookRotation(_intentDir, Vector3.up);
-                transform.rotation = Quaternion.Slerp(transform.rotation, rot, Time.deltaTime * facingLerpSpeed);
+                if (_turnBoosting)
+                {
+                    // 클릭 직후 첫 프레임: 900°/s 급으로 확 돌려 "돌고 나서 간다" 체감.
+                    transform.rotation = Quaternion.RotateTowards(transform.rotation, rot, facingSnapDegPerSec * Time.deltaTime);
+                    if (Quaternion.Angle(transform.rotation, rot) < 1f) _turnBoosting = false;   // 도달 → 부스트 종료
+                }
+                else
+                {
+                    // 회전 선점 이후: 강슬럽으로 방향 추종(방향 급전환에도 빠르게 재정렬).
+                    transform.rotation = Quaternion.Slerp(transform.rotation, rot, Time.deltaTime * facingLerpSpeed);
+                }
             }
+            else _turnBoosting = false;
+        }
+
+        // 예측기 비활성/파괴 시 회전 소유권을 UnitView 에 되돌려준다(플래그 고착 방지).
+        private void OnDisable()
+        {
+            if (_unitView != null) _unitView.ExternalRotationOwner = false;
+            _turnBoosting = false;
         }
 
         private static bool InputOn()

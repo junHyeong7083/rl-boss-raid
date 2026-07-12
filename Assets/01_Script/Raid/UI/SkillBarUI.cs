@@ -26,6 +26,7 @@ namespace BossRaid
             public string keyLabel;      // 키 라벨 (예: "W")
             public string cooldownKey;   // 스냅샷 cooldowns 키 (없으면 빈 문자열 = 쿨다운 없음)
             public int maxCooldown;      // 방사형 필 정규화용 최대 턴
+            public Color aimColor;       // 조준 중 테두리 글로우 색(HDR, 스킬 개성). 기본값이면 금색 사용
         }
 
         [Header("Refs (비우면 자동 탐색)")]
@@ -38,13 +39,13 @@ namespace BossRaid
         [SerializeField]
         private SkillSlotDef[] slotDefs = new SkillSlotDef[]
         {
-            new SkillSlotDef { label = "혈창",   keyLabel = "Q",     cooldownKey = "skill",   maxCooldown = 20 },
-            new SkillSlotDef { label = "혈월",   keyLabel = "W",     cooldownKey = "skill2",  maxCooldown = 40 },
-            new SkillSlotDef { label = "카운터", keyLabel = "E",     cooldownKey = "counter", maxCooldown = 25 },
-            new SkillSlotDef { label = "혈월처형", keyLabel = "R",   cooldownKey = "ult",     maxCooldown = 200 },
-            new SkillSlotDef { label = "대시",   keyLabel = "Shift", cooldownKey = "dash",    maxCooldown = 17 },
-            new SkillSlotDef { label = "가드",   keyLabel = "G",     cooldownKey = "parry",   maxCooldown = 10 },
-            new SkillSlotDef { label = "평타",   keyLabel = "C",     cooldownKey = "",        maxCooldown = 0 },
+            new SkillSlotDef { label = "혈창",   keyLabel = "Q",     cooldownKey = "skill",   maxCooldown = 20,  aimColor = new Color(2.2f, 0.28f, 0.22f, 1f) },  // 진홍
+            new SkillSlotDef { label = "혈월",   keyLabel = "W",     cooldownKey = "skill2",  maxCooldown = 40,  aimColor = new Color(2.4f, 0.16f, 0.30f, 1f) },  // 혈적
+            new SkillSlotDef { label = "카운터", keyLabel = "E",     cooldownKey = "counter", maxCooldown = 25,  aimColor = new Color(0.35f, 1.1f, 2.4f, 1f) },   // 청백(반격)
+            new SkillSlotDef { label = "혈월처형", keyLabel = "R",   cooldownKey = "ult",     maxCooldown = 200, aimColor = new Color(2.6f, 1.7f, 0.5f, 1f) },    // 금(궁극)
+            new SkillSlotDef { label = "대시",   keyLabel = "Shift", cooldownKey = "dash",    maxCooldown = 17,  aimColor = new Color(0.6f, 1.9f, 1.6f, 1f) },    // 청록(기동)
+            new SkillSlotDef { label = "가드",   keyLabel = "G",     cooldownKey = "parry",   maxCooldown = 10,  aimColor = new Color(1.6f, 1.5f, 2.4f, 1f) },    // 은청(가드)
+            new SkillSlotDef { label = "평타",   keyLabel = "C",     cooldownKey = "",        maxCooldown = 0,   aimColor = new Color(2.0f, 1.4f, 0.6f, 1f) },     // 금(평타)
         };
 
         [Header("Style (로아 톤)")]
@@ -56,9 +57,19 @@ namespace BossRaid
         [SerializeField] private Color cdOverlay = new Color(0f, 0f, 0f, 0.7f);          // 검정 70%
         [SerializeField] private float shakeDuration = 0.35f;
         [SerializeField] private float shakeMagnitude = 8f;
-        [Tooltip("조준 모드 하이라이트 펄스 색(밝은 금색).")]
+        [Tooltip("조준 모드 하이라이트 펄스 색(밝은 금색). 글로우 셰이더 미탑재(폴백) 시에만 사용.")]
         [SerializeField] private Color aimPulseColor = new Color32(0xFF, 0xE2, 0x8A, 0xff);
         [SerializeField] private float aimPulseSpeed = 6f;
+
+        [Header("Slot Glow Shader (BossRaid/UISlotGlow — 테두리 링 글로우)")]
+        [Tooltip("평상시 테두리 금색(HDR). 은은한 흐름/맥동.")]
+        [SerializeField] private Color idleGlowColor = new Color(1.15f, 0.92f, 0.42f, 1f);
+        [Tooltip("평상시 테두리를 도는 광택 스팟 속도(사용자 선호 0.5배 감각).")]
+        [SerializeField] private float idleFlowSpeed = 0.5f;
+        [Tooltip("조준 중 테두리 도는 광택 스팟 속도(상승).")]
+        [SerializeField] private float aimFlowSpeed = 1.7f;
+        [Tooltip("쿨다운 중 저채도 어두운 테두리 색.")]
+        [SerializeField] private Color cooldownGlowColor = new Color(0.16f, 0.14f, 0.10f, 1f);
         [Tooltip("쿨다운 숫자를 남은 '초'로 표시할 때 턴→초 환산 계수(서버 turn-interval=0.3s). "
                + "20/40턴급 긴 쿨은 턴수보다 초(소수1)가 직관적.")]
         [SerializeField] private float secondsPerTurn = 0.3f;
@@ -72,13 +83,25 @@ namespace BossRaid
             public Image cdFill;              // 방사형 쿨다운 필
             public Text cdText;               // 남은 턴
             public float shakeElapsed = float.MaxValue;
+            public Material glowMat;          // 테두리 링 글로우 머티리얼 인스턴스(슬롯당 1회 캐시, null=폴백)
+            public bool onCooldown;           // 현재 쿨다운 진행 중(글로우 상태 결정용)
+            public int glowState = -1;        // 현재 적용된 글로우 상태(0 평상/1 조준/2 쿨다운), 변경 시에만 재세팅
         }
 
         private readonly List<Slot> _slots = new List<Slot>();
         private Sprite _whiteSprite;
         private Font _font;
+        private Shader _glowShader;
         private bool _subscribed;
         private bool _built;
+
+        // ─── UISlotGlow 셰이더 프로퍼티 ID ───
+        private static readonly int GlowColorId = Shader.PropertyToID("_GlowColor");
+        private static readonly int FlowSpeedId = Shader.PropertyToID("_FlowSpeed");
+        private static readonly int FlowIntensityId = Shader.PropertyToID("_FlowIntensity");
+        private static readonly int PulseSpeedId = Shader.PropertyToID("_PulseSpeed");
+        private static readonly int PulseAmpId = Shader.PropertyToID("_PulseAmp");
+        private static readonly int IntensityId = Shader.PropertyToID("_Intensity");
         private string _aimKey;                                                        // 조준 중 슬롯의 cooldownKey (null = 없음)
         private readonly Dictionary<string, int> _serverCds = new Dictionary<string, int>();     // 최신 서버 쿨다운
         private readonly Dictionary<string, int> _predictedCds = new Dictionary<string, int>();  // 클라 예측 쿨다운
@@ -88,12 +111,19 @@ namespace BossRaid
             if (viewer == null) viewer = FindFirstObjectByType<BossGameViewer>();
             _font = LoadFont();
             _whiteSprite = MakeWhiteSprite();
+            _glowShader = Shader.Find("BossRaid/UISlotGlow");   // null 이면 폴백(기존 단색 테두리 펄스)
             Build();
         }
 
         private void OnEnable()  => TrySubscribe();
         private void OnDisable() => Unsubscribe();
-        private void OnDestroy() => Unsubscribe();
+        private void OnDestroy()
+        {
+            Unsubscribe();
+            // 슬롯당 생성한 글로우 머티리얼 인스턴스 해제(누수 방지).
+            foreach (var slot in _slots)
+                if (slot.glowMat != null) Destroy(slot.glowMat);
+        }
 
         // ─────────────── 스냅샷 구독 ───────────────
 
@@ -187,16 +217,17 @@ namespace BossRaid
         public void SetAimHighlight(string cooldownKey)
         {
             _aimKey = string.IsNullOrEmpty(cooldownKey) ? null : cooldownKey;
-            // 해제 시 테두리 색 즉시 복원.
+            // 해제 시 테두리 색 즉시 복원(폴백 경로만 — 글로우 셰이더는 Update 가 상태 재구동).
             if (_aimKey == null)
             {
                 foreach (var slot in _slots)
-                    if (slot.border != null) slot.border.color = slotBorder;
+                    if (slot.glowMat == null && slot.border != null) slot.border.color = slotBorder;
             }
         }
 
         private void SetSlotCooldown(Slot slot, int remaining, int max)
         {
+            slot.onCooldown = remaining > 0;   // 글로우 상태(쿨다운 저채도) 판정용
             float fill = max > 0 ? Mathf.Clamp01((float)remaining / max) : 0f;
             if (slot.cdFill != null) slot.cdFill.fillAmount = fill;
             if (slot.cdText != null)
@@ -233,10 +264,18 @@ namespace BossRaid
             float pulse = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * aimPulseSpeed);
             foreach (var slot in _slots)
             {
-                // 조준 하이라이트: 테두리 금색 펄스.
-                if (slot.border != null)
+                bool highlighted = _aimKey != null && slot.def.cooldownKey == _aimKey;
+
+                // 테두리 상태 구동: 글로우 셰이더 탑재 시 파라미터로, 미탑재(폴백)면 단색 펄스.
+                if (slot.glowMat != null)
                 {
-                    bool highlighted = _aimKey != null && slot.def.cooldownKey == _aimKey;
+                    // 상태 우선순위: 조준 > 쿨다운 > 평상. 흐름/맥동은 셰이더가 _Time 으로 스스로 굴린다.
+                    int state = highlighted ? 1 : (slot.onCooldown ? 2 : 0);
+                    if (state != slot.glowState) { ApplyGlowState(slot, state); slot.glowState = state; }
+                }
+                else if (slot.border != null)
+                {
+                    // 폴백: 기존 금색 단색 펄스.
                     slot.border.color = highlighted
                         ? Color.Lerp(slotBorder, aimPulseColor, pulse)
                         : slotBorder;
@@ -250,6 +289,41 @@ namespace BossRaid
                 if (slot.shakeRoot != null) slot.shakeRoot.localPosition = new Vector3(off, 0f, 0f);
                 if (slot.shakeElapsed >= shakeDuration && slot.shakeRoot != null)
                     slot.shakeRoot.localPosition = Vector3.zero;
+            }
+        }
+
+        /// <summary>슬롯 테두리 글로우 머티리얼을 상태별 파라미터로 세팅(0 평상/1 조준/2 쿨다운).</summary>
+        private void ApplyGlowState(Slot slot, int state)
+        {
+            var m = slot.glowMat;
+            if (m == null) return;
+            switch (state)
+            {
+                case 1:   // 조준: 스킬 색(HDR) 강조 + 흐름/맥동 상승
+                    Color aim = slot.def.aimColor.maxColorComponent > 0.01f ? slot.def.aimColor : idleGlowColor;
+                    m.SetColor(GlowColorId, aim);
+                    m.SetFloat(FlowSpeedId, aimFlowSpeed);
+                    m.SetFloat(FlowIntensityId, 1.8f);
+                    m.SetFloat(PulseSpeedId, 6f);
+                    m.SetFloat(PulseAmpId, 0.28f);
+                    m.SetFloat(IntensityId, 1.7f);
+                    break;
+                case 2:   // 쿨다운: 저채도 어둡게
+                    m.SetColor(GlowColorId, cooldownGlowColor);
+                    m.SetFloat(FlowSpeedId, 0.15f);
+                    m.SetFloat(FlowIntensityId, 0.2f);
+                    m.SetFloat(PulseSpeedId, 0f);
+                    m.SetFloat(PulseAmpId, 0f);
+                    m.SetFloat(IntensityId, 0.5f);
+                    break;
+                default:  // 평상: 금색 은은(사용자 선호 느린 흐름)
+                    m.SetColor(GlowColorId, idleGlowColor);
+                    m.SetFloat(FlowSpeedId, idleFlowSpeed);
+                    m.SetFloat(FlowIntensityId, 0.8f);
+                    m.SetFloat(PulseSpeedId, 1.5f);
+                    m.SetFloat(PulseAmpId, 0.08f);
+                    m.SetFloat(IntensityId, 1.0f);
+                    break;
             }
         }
 
@@ -298,6 +372,17 @@ namespace BossRaid
             // 금색 테두리(뒤 판) + 어두운 배경(앞 판, 살짝 인셋).
             var border = NewImage("Border", shakeRoot, slotBorder);
             Stretch(border);
+
+            // 테두리 링 글로우 머티리얼(슬롯당 인스턴스 1회 생성 — 색/파라미터 개별 제어).
+            // 셰이더는 색을 _GlowColor 로 구동하므로 Image.color 는 흰색(알파=페이드 전용)으로 둔다.
+            Material glowMat = null;
+            if (_glowShader != null)
+            {
+                glowMat = new Material(_glowShader) { hideFlags = HideFlags.HideAndDontSave };
+                border.material = glowMat;
+                border.color = Color.white;
+            }
+
             var bg = NewImage("Bg", shakeRoot, slotBg);
             Stretch(bg, 3f);
 
@@ -333,7 +418,7 @@ namespace BossRaid
             cdText.fontStyle = FontStyle.Bold;
             cdText.enabled = false;
 
-            return new Slot { def = def, shakeRoot = shakeRoot, border = border, cdFill = cdFill, cdText = cdText };
+            return new Slot { def = def, shakeRoot = shakeRoot, border = border, cdFill = cdFill, cdText = cdText, glowMat = glowMat };
         }
 
         private void EnsureCanvas()

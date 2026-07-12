@@ -58,6 +58,13 @@ namespace BossRaid
         /// <summary>예측기 계약: 예측 오프셋이 섞이지 않은 권위 렌더 위치. 첫 데이터 전에는 transform 폴백.</summary>
         public Vector3 AuthoritativePosition => _hasData ? _authPos : transform.position;
 
+        /// <summary>
+        /// 이동 회전 소유권 위임 플래그. 딜러의 DealerMotionPredictor 가 intent 활성 동안 true 로 세팅한다.
+        /// true 인 동안 UnitView.Update 의 회전 로직(이동 방향/보스 바라보기 Slerp)을 스킵해
+        /// 예측기의 intent 회전과 이중 슬럽 경합(떨림/역회전)을 없앤다. NPC 유닛은 항상 false(기존 동작).
+        /// </summary>
+        public bool ExternalRotationOwner { get; set; }
+
         // ─────────────── 피격 플래시 / 사망 디졸브 (MPB, 머티리얼 신규 인스턴스 생성 금지) ───────────────
         [Header("Juice (피격/사망 연출)")]
         [Tooltip("피격 흰 플래시 지속(초, unscaled)")]
@@ -91,6 +98,12 @@ namespace BossRaid
             if (animator == null) animator = GetComponentInChildren<Animator>();
             _mpb = new MaterialPropertyBlock();
             CacheFxRenderers();
+
+            // 순간이동 근절: 프리팹에 직렬화된 snapDistance(3.0)가 코드 기본값을 덮어써,
+            // 대시(2.5)+같은 턴 이동(≈1.0)의 서버 위치 점프(3.0+)가 임계 초과 → 텔레포트로 오판됐다.
+            // 최소 4.6 으로 강제해 대시+이동 한 턴 점프(≈3.5)를 보간으로 수용한다.
+            // 에피소드 리셋(유닛 재배치 거리 5+)은 여전히 초과 → 정상 스냅 유지.
+            snapDistance = Mathf.Max(snapDistance, 4.6f);
         }
 
         /// <summary>본체 렌더러만 캐시. HP바/디스이펙트/버프이펙트/파티클/라인/트레일은 플래시 대상 제외.</summary>
@@ -259,28 +272,33 @@ namespace BossRaid
                 // Dead bool 은 ApplySnapshot 의 생존 전환 처리에서만 세팅(중복/충돌 제거).
             }
 
-            // 이동 중이면 이동 방향, 정지면 보스를 바라봄 (전투 중 자연스러움)
-            Vector3 faceTarget;
-            bool haveFace = false;
-            if (moveDir.sqrMagnitude > 0.0004f)
+            // 회전: 딜러 예측기가 소유권을 가져간 동안(ExternalRotationOwner)은 스킵 —
+            // 예측기의 intent 회전과 이중 슬럽 경합(떨림/역회전)을 없앤다. NPC/비소유 시 기존 로직.
+            if (!ExternalRotationOwner)
             {
-                faceTarget = transform.position + moveDir.normalized;
-                haveFace = true;
-            }
-            else if (viewer != null && viewer.TryGetBossPosition(out var bossPos))
-            {
-                faceTarget = bossPos;
-                haveFace = true;
-            }
-            else faceTarget = transform.position + transform.forward;
+                // 이동 중이면 이동 방향, 정지면 보스를 바라봄 (전투 중 자연스러움)
+                Vector3 faceTarget;
+                bool haveFace = false;
+                if (moveDir.sqrMagnitude > 0.0004f)
+                {
+                    faceTarget = transform.position + moveDir.normalized;
+                    haveFace = true;
+                }
+                else if (viewer != null && viewer.TryGetBossPosition(out var bossPos))
+                {
+                    faceTarget = bossPos;
+                    haveFace = true;
+                }
+                else faceTarget = transform.position + transform.forward;
 
-            if (haveFace)
-            {
-                var flat = new Vector3(faceTarget.x - transform.position.x, 0, faceTarget.z - transform.position.z);
-                if (flat.sqrMagnitude > 0.0001f)
-                    _targetRot = Quaternion.LookRotation(flat.normalized, Vector3.up);
+                if (haveFace)
+                {
+                    var flat = new Vector3(faceTarget.x - transform.position.x, 0, faceTarget.z - transform.position.z);
+                    if (flat.sqrMagnitude > 0.0001f)
+                        _targetRot = Quaternion.LookRotation(flat.normalized, Vector3.up);
+                }
+                transform.rotation = Quaternion.Slerp(transform.rotation, _targetRot, Time.deltaTime * rotateLerpSpeed);
             }
-            transform.rotation = Quaternion.Slerp(transform.rotation, _targetRot, Time.deltaTime * rotateLerpSpeed);
         }
 
         private void LateUpdate()
