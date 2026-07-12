@@ -45,6 +45,15 @@ namespace BossRaid
         private static readonly Color ColDamageTaken   = new Color(0.95f, 0.20f, 0.18f, 1f); // 빨강(아군 피격)
         private static readonly Color ColHeal          = new Color(0.35f, 0.95f, 0.45f, 1f); // 초록(힐)
 
+        // ── NPC 스킬명 플로터(보조 정보 톤, 채도 낮게) ──
+        private const float SkillLife = 0.8f;      // 상승 페이드 수명(초)
+        private const int   SkillFontSize = 18;    // 작은 폰트
+        private const float SkillRisePx = 30f;     // 위로 떠오르는 거리(px)
+        private static readonly Color ColTaunt     = new Color(0.90f, 0.55f, 0.38f, 1f); // 도발(옅은 주황)
+        private static readonly Color ColHealSkill = new Color(0.55f, 0.85f, 0.60f, 1f); // 치유(옅은 초록)
+        private static readonly Color ColBuff      = new Color(0.55f, 0.80f, 0.95f, 1f); // 버프(하늘색)
+        private static readonly Color ColGuard     = new Color(0.45f, 0.62f, 0.95f, 1f); // 가드(파랑)
+
         private RectTransform _canvasRect;
         private BossGameViewer _viewer;
         private Font _font;
@@ -101,9 +110,32 @@ namespace BossRaid
         {
             if (snap == null || snap.events == null) return;
 
+            bool guardShown = false;   // guard_success 는 전 uid 로 방출되므로 스냅샷당 1회만
+
             foreach (var ev in snap.events)
             {
                 if (ev == null || string.IsNullOrEmpty(ev.type)) continue;
+
+                // ── NPC 스킬명 플로터(데미지 숫자와 별개, 시전 유닛 머리 위) ──
+                switch (ev.type)
+                {
+                    case "taunt":
+                        SpawnSkillLabel(ev.uid, "도발!", ColTaunt, snap);
+                        continue;
+                    case "buff":
+                        SpawnSkillLabel(ev.uid, "버프!", ColBuff, snap);
+                        continue;
+                    case "guard_success":
+                        if (!guardShown)
+                        {
+                            // 실제 가드한 탱커(role==Tank) 머리 위. 없으면 이벤트 uid.
+                            int tuid = FindTankUid(snap);
+                            SpawnSkillLabel(tuid >= 0 ? tuid : ev.uid, "가드!", ColGuard, snap);
+                            guardShown = true;
+                        }
+                        continue;
+                }
+
                 if (ev.type != "damage" && ev.type != "damage_taken" && ev.type != "heal") continue;
 
                 // 보스에 준 피해(damage)는 플레이어 딜러(uid 0)의 것만 표시한다.
@@ -115,7 +147,40 @@ namespace BossRaid
                 if (!TryResolveWorld(ev, snap, out var world)) continue;
 
                 SpawnFor(ev, world + Vector3.up * SpawnHeight);
+
+                // 힐: 대상 위 초록 "+N" 숫자(기존)에 더해 시전자 머리 위 "치유!" 스킬명 표기.
+                if (ev.type == "heal")
+                {
+                    string lbl = ev.amount > 0 ? $"치유! +{ev.amount}" : "치유!";
+                    SpawnSkillLabel(ev.uid, lbl, ColHealSkill, snap);
+                }
             }
+        }
+
+        /// <summary>NPC 보조 스킬명 플로터: 시전 유닛(uid) 머리 위에 작은 폰트 0.8s 상승 페이드.</summary>
+        private void SpawnSkillLabel(int uid, string label, Color color, BossSnapshot snap)
+        {
+            if (!TryUnitWorld(uid, snap, out var world)) return;
+            var cfg = new Floater
+            {
+                colStart = color,
+                colEnd = color,                 // 그라데이션 없음(차분한 보조 톤)
+                life = SkillLife,
+                risePx = SkillRisePx,
+                spreadPx = Random.Range(-SpreadPxMax * 0.4f, SpreadPxMax * 0.4f),
+                rotDeg = 0f,
+                crit = false,
+            };
+            Spawn(cfg, world + Vector3.up * SpawnHeight, label, SkillFontSize);
+        }
+
+        /// <summary>탱커(role==Tank) uid 조회. 가드 표기 대상.</summary>
+        private static int FindTankUid(BossSnapshot snap)
+        {
+            if (snap.units == null) return -1;
+            foreach (var u in snap.units)
+                if (u != null && u.role == (int)PartyRole.Tank && u.alive) return u.uid;
+            return -1;
         }
 
         /// <summary>이벤트 종류·크리 여부에 따라 라벨/색/연출 파라미터를 구성해 스폰.</summary>

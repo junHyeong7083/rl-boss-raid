@@ -113,7 +113,9 @@ class RaidConfig:
     player_slot: int = 0
 
     # ── 보스 ──
-    boss_max_hp: int = 2000
+    # 목표 플레이타임 3분 기준 실측 튜닝 (FSM 4인 n=14: 승리 킬타임 중앙값 178.8s,
+    # 파티 지속 DPS ~92/턴 × 목표 630턴). 2000 이던 시절엔 18초 컷이었음.
+    boss_max_hp: int = 55000
     boss_base_attack: int = 30
     boss_defense: int = 3
     boss_radius: float = 1.0
@@ -157,7 +159,7 @@ class RaidConfig:
     phase_transition_invuln_turns: int = 2
 
     # ── 에피소드 ──
-    max_steps: int = 1000
+    max_steps: int = 1300              # 6.5분 타임아웃 — 3분 목표 전투에 여유
 
     # ── 관측 / 행동 ──
     # 관측 구성 (총 128차원) — 상세 표는 docs/RAID_V2_DESIGN.md 및 아래 OBS_LAYOUT:

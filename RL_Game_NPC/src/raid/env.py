@@ -283,6 +283,16 @@ class RaidEnv:
             ny = min(max(u.y + dy, u.radius), self.config.map_height - u.radius)
             if not self._blocked_for_unit(uid, nx, ny):
                 u.x, u.y = nx, ny
+                continue
+            # 충돌 슬라이딩: 대각/직선 이동이 장애물(보스/기둥)에 막히면 축 성분으로
+            # 분해해 미끄러진다. (없으면 기둥 뒤 은신 등에서 벽에 붙어 영구 제자리걸음)
+            sx = min(max(u.x + dx, u.radius), self.config.map_width - u.radius)
+            if dx != 0 and not self._blocked_for_unit(uid, sx, u.y):
+                u.x = sx
+                continue
+            sy = min(max(u.y + dy, u.radius), self.config.map_height - u.radius)
+            if dy != 0 and not self._blocked_for_unit(uid, u.x, sy):
+                u.y = sy
         # 비이동
         for aid, action in actions.items():
             uid = self.uid_of(aid)
@@ -313,7 +323,13 @@ class RaidEnv:
     def _blocked_for_unit(self, uid: int, nx: float, ny: float) -> bool:
         u = self.units[uid]
         for ox, oy, orad in self._obstacle_circles():
-            if math.hypot(nx - ox, ny - oy) < u.radius + orad - 0.05:
+            limit = u.radius + orad - 0.05
+            if math.hypot(nx - ox, ny - oy) < limit:
+                # 탈출 허용: 이미 장애물과 겹쳐 있으면(보스가 유닛 위로 이동해 오는 등)
+                # 거리가 멀어지는 이동은 통과 — 없으면 보스 몸속에 영구 감금된다.
+                if math.hypot(u.x - ox, u.y - oy) < limit and \
+                   math.hypot(nx - ox, ny - oy) >= math.hypot(u.x - ox, u.y - oy) - 1e-6:
+                    continue
                 return True
         return False
 
@@ -740,7 +756,8 @@ class RaidEnv:
 
     def _tick_seal(self, ap: ActivePattern):
         hidden_flags = {u.uid: (u.alive and self._unit_hidden(u)) for u in self.units.values()}
-        all_hidden = all(u.alive and hidden_flags[u.uid] for u in self.units.values())
+        # 판정은 "생존자 전원 은신" — 이미 죽은 파티원이 기믹을 자동 실패시키지 않게.
+        all_hidden = all(hidden_flags[u.uid] for u in self.units.values() if u.alive)
         for uid in self.units:
             self.step_events[uid].append({"type": "seal_holding",
                                           "hidden": bool(hidden_flags.get(uid, False)),

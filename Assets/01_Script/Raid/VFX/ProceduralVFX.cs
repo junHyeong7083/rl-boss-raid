@@ -17,6 +17,7 @@ namespace BossRaid
     ///   Debris(pos,baseColor)                       — 중력 있는 돌 파편
     ///   Aura(parent,color)                          — 루프 오라(반환 GO 를 Destroy 해 정지)
     ///   Trail(from,to,color)                        — 선분 트레일 스트릭
+    ///   Projectile(from,to,color,duration,size)     — 실제로 "날아가는" 발광 투사체(비주얼 생성만; 이동은 caller 코루틴)
     /// </summary>
     public static class ProceduralVFX
     {
@@ -206,6 +207,190 @@ namespace BossRaid
             shape.enabled = true;
             shape.shapeType = ParticleSystemShapeType.SingleSidedEdge;
             shape.radius = Mathf.Max(0.1f, len * 0.5f);
+
+            ApplyFadeAndShrink(ps, 0.5f, 0.4f);
+
+            ps.Play();
+            return go;
+        }
+
+        /// <summary>
+        /// 실제로 "날아가는" 발광 투사체(비주얼 생성만 — 이동은 caller 코루틴이 transform 을 매 프레임 갱신).
+        /// simulationSpace=World + 연속 방출로, 헤드가 이동하면 방출된 파티클이 제자리에 남아 자연스러운 트레일이 됨.
+        /// caller 가 lifecycle 을 관리하므로 stopAction=Destroy 를 지정하지 않는다(RaidVFXManager 풀링과 호환).
+        /// from 위치에서 즉시 Play. 재사용 시 caller 가 startColor/startSize/position 을 재설정 후 Clear/Play.
+        /// duration 은 트레일 잔상 길이(startLifetime)에 반영. to 는 헤드 진행 방향 정렬(비주얼 힌트)에만 사용.
+        /// </summary>
+        public static GameObject Projectile(Vector3 from, Vector3 to, Color color, float duration, float size)
+        {
+            var ps = NewSystem("VFX_Projectile", from, SHAPE_CIRCLE, out var go);
+
+            Vector3 dir = to - from;
+            if (dir.sqrMagnitude > 1e-6f)
+                go.transform.rotation = Quaternion.LookRotation(dir.normalized);
+
+            var main = ps.main;
+            main.duration = 1f;
+            main.loop = true;                              // 비행 동안 계속 방출(트레일 유지) — caller 가 정지
+            main.playOnAwake = false;
+            main.startLifetime = Mathf.Clamp(duration * 0.9f, 0.12f, 0.35f);  // 트레일 잔상 길이
+            main.startSpeed = 0.25f;                       // 거의 정지 → 헤드 이동으로 트레일 형성
+            main.startSize = Mathf.Max(0.05f, size);
+            main.startColor = Hdr(color, 2.6f);
+            main.gravityModifier = 0f;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;   // 핵심: 방출 후 제자리 → 트레일
+            main.maxParticles = 220;
+            // stopAction 미지정 (풀링 lifecycle 은 caller 소유)
+
+            var emission = ps.emission;
+            emission.enabled = true;
+            emission.rateOverTime = 150f;                  // 촘촘한 헤드/트레일
+
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Sphere;
+            shape.radius = 0.06f;
+
+            ApplyFadeAndShrink(ps, 0.2f, 0.1f);            // 뒤로 갈수록 흐려지고 작아짐
+
+            ps.Play();
+            return go;
+        }
+
+        /// <summary>위로 솟구치는 원뿔 분수(도발 "나를 봐라" 강조). 살짝 중력으로 되떨어짐.</summary>
+        public static GameObject Fountain(Vector3 pos, Color color)
+        {
+            var ps = NewSystem("VFX_Fountain", pos, SHAPE_STAR, out var go);
+
+            var main = ps.main;
+            main.duration = 0.15f;
+            main.loop = false;
+            main.playOnAwake = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.45f, 0.7f);
+            main.startSpeed = new ParticleSystem.MinMaxCurve(4f, 7f);
+            main.startSize = new ParticleSystem.MinMaxCurve(0.15f, 0.3f);
+            main.startColor = Hdr(color, 2.4f);
+            main.gravityModifier = 0.6f;                   // 솟았다가 살짝 낙하
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 48;
+            main.stopAction = ParticleSystemStopAction.Destroy;
+
+            SetBurstCount(ps, 22);
+
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Cone;
+            shape.angle = 16f;
+            shape.radius = 0.15f;
+            shape.rotation = new Vector3(-90f, 0f, 0f);    // 원뿔 축을 +Y(위)로
+
+            ApplyFadeAndShrink(ps, 0.6f, 0.4f);
+
+            ps.Play();
+            return go;
+        }
+
+        /// <summary>대상 상공에서 아래로 떨어지는 스파클(힐 강림). 중력 양수로 낙하.</summary>
+        public static GameObject SparkleFall(Vector3 pos, Color color)
+        {
+            var ps = NewSystem("VFX_SparkleFall", pos + Vector3.up * 2.4f, SHAPE_STAR, out var go);
+
+            var main = ps.main;
+            main.duration = 0.15f;
+            main.loop = false;
+            main.playOnAwake = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.5f, 0.95f);
+            main.startSpeed = 0.2f;
+            main.startSize = new ParticleSystem.MinMaxCurve(0.12f, 0.28f);
+            main.startColor = Hdr(color, 2.2f);
+            main.gravityModifier = 0.9f;                   // 아래로 떨어짐
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 48;
+            main.stopAction = ParticleSystemStopAction.Destroy;
+
+            SetBurstCount(ps, 20);
+
+            // 대상 상공의 원반에서 흩뿌리듯 방출.
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Circle;
+            shape.radius = 0.85f;
+            shape.radiusThickness = 1f;
+            shape.rotation = new Vector3(90f, 0f, 0f);     // XZ 평면(수평 원반)
+
+            ApplyFadeAndShrink(ps, 0.6f, 0.5f);
+
+            ps.Play();
+            return go;
+        }
+
+        /// <summary>유닛을 감싸는 반구형 실드 플래시(가드). 링 파티클이 돔처럼 바깥으로 퍼짐.</summary>
+        public static GameObject ShieldFlash(Vector3 pos, Color color)
+        {
+            var ps = NewSystem("VFX_ShieldFlash", pos + Vector3.up * 0.6f, SHAPE_RING, out var go);
+
+            var main = ps.main;
+            main.duration = 0.1f;
+            main.loop = false;
+            main.playOnAwake = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.32f, 0.45f);
+            main.startSpeed = 3.6f;
+            main.startSize = new ParticleSystem.MinMaxCurve(0.28f, 0.55f);
+            main.startColor = Hdr(color, 2.7f);
+            main.gravityModifier = 0f;
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 72;
+            main.stopAction = ParticleSystemStopAction.Destroy;
+
+            SetBurstCount(ps, 44);
+
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Hemisphere;   // 반구 껍질 → 돔
+            shape.radius = 0.6f;
+            shape.radiusThickness = 0.2f;
+
+            ApplyFadeAndShrink(ps, 0.4f, 0.4f);
+
+            ps.Play();
+            return go;
+        }
+
+        /// <summary>유닛 주위를 회전하며 상승하는 나선 오라(버프). 궤도 속도 + 음의 중력으로 솟구침.</summary>
+        public static GameObject Spiral(Vector3 pos, Color color)
+        {
+            var ps = NewSystem("VFX_Spiral", pos, SHAPE_DIAMOND, out var go);
+
+            var main = ps.main;
+            main.duration = 0.4f;                          // 0.4s 동안 계속 방출 → 상승 나선
+            main.loop = false;
+            main.playOnAwake = false;
+            main.startLifetime = new ParticleSystem.MinMaxCurve(0.5f, 0.8f);
+            main.startSpeed = 0.15f;
+            main.startSize = new ParticleSystem.MinMaxCurve(0.14f, 0.3f);
+            main.startColor = Hdr(color, 2.3f);
+            main.gravityModifier = -0.45f;                 // 상승
+            main.simulationSpace = ParticleSystemSimulationSpace.World;
+            main.maxParticles = 64;
+            main.stopAction = ParticleSystemStopAction.Destroy;
+
+            // 단발 버스트가 아니라 시간에 걸쳐 방출(나선이 위로 이어지게).
+            var emission = ps.emission;
+            emission.enabled = true;
+            emission.rateOverTime = 55f;
+
+            var shape = ps.shape;
+            shape.enabled = true;
+            shape.shapeType = ParticleSystemShapeType.Circle;
+            shape.radius = 0.7f;
+            shape.radiusThickness = 0.15f;                 // 링 둘레에서
+            shape.rotation = new Vector3(90f, 0f, 0f);
+            shape.arc = 360f;
+
+            // 궤도 속도 → 수직축 회전(나선).
+            var vel = ps.velocityOverLifetime;
+            vel.enabled = true;
+            vel.orbitalY = new ParticleSystem.MinMaxCurve(3.2f);
 
             ApplyFadeAndShrink(ps, 0.5f, 0.4f);
 

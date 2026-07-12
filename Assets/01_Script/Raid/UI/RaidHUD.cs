@@ -198,6 +198,8 @@ namespace BossRaid
         private CounterAlertUI _counter;
         private SealAlertUI _seal;
         private GimmickGuideUI _gimmick;
+        private PatternAnnounceUI _announce;
+        private SafeGuideMarker _safeGuide;
 
         private bool _subscribed;
 
@@ -215,12 +217,18 @@ namespace BossRaid
             _counter  = CreateChild<CounterAlertUI>("CounterAlert");
             _seal     = CreateChild<SealAlertUI>("SealAlert");
             _gimmick  = CreateChild<GimmickGuideUI>("GimmickGuide");
+            _announce = CreateChild<PatternAnnounceUI>("PatternAnnounce");
 
             _party.Build(_canvas, _font);
             _floating.Build(_canvas, _canvasRect, _font, viewer);
             _counter.Build(_canvas, _font);
             _seal.Build(_canvas, _font);
             _gimmick.Build(_canvas, _font);
+            _announce.Build(_canvas, _font);
+
+            // 안전 유도 마커(월드 공간, self-contained): viewer 만 넘겨주면 스스로 구독한다.
+            _safeGuide = CreateChild<SafeGuideMarker>("SafeGuide");
+            _safeGuide.viewer = viewer;
         }
 
         private void OnEnable()
@@ -376,6 +384,8 @@ namespace BossRaid
             if (_counter != null)  _counter.OnSnapshot(snap);
             if (_seal != null)     _seal.OnSnapshot(snap);
             if (_gimmick != null)  _gimmick.OnSnapshot(snap);
+            if (_announce != null) _announce.OnSnapshot(snap);
+            // _safeGuide 는 viewer.OnSnapshotApplied 를 스스로 구독하므로 여기서 호출하지 않음.
         }
 
         private void UpdateBossBar(BossSnapshot snap)

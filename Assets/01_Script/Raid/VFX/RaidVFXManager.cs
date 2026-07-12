@@ -34,8 +34,10 @@ namespace BossRaid
         private static readonly Color COrange    = new Color(1.00f, 0.55f, 0.16f);
         private static readonly Color CCrimson   = new Color(0.85f, 0.06f, 0.12f);
         private static readonly Color CGold      = new Color(1.00f, 0.82f, 0.25f);
-        private static readonly Color CCyan      = new Color(0.25f, 0.95f, 0.90f);
         private static readonly Color CSilver    = new Color(0.90f, 0.94f, 1.00f);   // 평타 은백
+        private static readonly Color CGreen     = new Color(0.35f, 1.00f, 0.45f);   // 힐 초록
+        private static readonly Color CBuffAtk   = new Color(1.00f, 0.42f, 0.42f);   // 공버프 붉은기
+        private static readonly Color CBuffShield = new Color(0.42f, 0.72f, 1.00f);  // 실드버프 파란기
 
         // ─── 텔레그래프 스텝 발동 감지 상태 ───
         // key = "pattern:step_index". turns_remaining<=1 일 때 무장(arm)하고,
@@ -94,6 +96,7 @@ namespace BossRaid
             if (snap.events == null) return;
 
             Vector3 bossPos = BossPos();
+            bool guardShown = false;   // guard_success 는 전 유닛 브로드캐스트 → 스냅샷당 1회(탱커 위치)만 연출
 
             foreach (var ev in snap.events)
             {
@@ -102,12 +105,46 @@ namespace BossRaid
                 {
                     case "guard_success":
                     {
-                        // 탱커(가드한 유닛) 위치 파란 실드 파열.
-                        Vector3 p = UnitPos(snap, ev.uid, bossPos);
-                        ProceduralVFX.RingWave(p, CBlue, 2.2f, 0.35f);
-                        ProceduralVFX.Burst(p, CBlue, 22, 5f, 0.35f, 0.4f);
+                        if (guardShown) break;
+                        guardShown = true;
+                        // 탱커 가드 딜타임 성공: 유닛을 감싸는 파란 반구형 실드 플래시(강하게).
+                        // 이벤트 uid 는 브로드캐스트라 신뢰 불가 → 탱커(role==1) 유닛 위치로 특정.
+                        int guardUid = ev.uid;
+                        if (snap.units != null)
+                            foreach (var u in snap.units)
+                                if (u != null && u.role == 1) { guardUid = u.uid; break; }
+                        Vector3 p = UnitPos(snap, guardUid, bossPos);
+                        ProceduralVFX.ShieldFlash(p, CBlue);
+                        ProceduralVFX.RingWave(p, CBlue, 2.8f, 0.42f);
+                        ProceduralVFX.Burst(p + Vector3.up * 0.6f, CBlue, 24, 5.5f, 0.36f, 0.42f);
                         HitStopManager.HitStop(0.1f);
-                        LostArkCamera.ShakeCamera(0.3f, 0.2f);
+                        LostArkCamera.ShakeCamera(0.35f, 0.22f);
+                        break;
+                    }
+                    case "taunt":
+                    {
+                        // 탱커 도발("나를 봐라"): 주황-금 링 확장 + 위로 솟는 분수.
+                        Vector3 p = UnitPos(snap, ev.uid, bossPos);
+                        ProceduralVFX.RingWave(p, COrange, 2.6f, 0.45f);
+                        ProceduralVFX.RingWave(p, CGold, 1.5f, 0.3f);
+                        ProceduralVFX.Fountain(p + Vector3.up * 0.2f, CGold);
+                        break;
+                    }
+                    case "heal":
+                    {
+                        // 힐러 치유: 대상 유닛 상공에서 아래로 떨어지는 초록 스파클 + 부드러운 초록 링.
+                        Vector3 p = UnitPos(snap, ev.target, UnitPos(snap, ev.uid, bossPos));
+                        ProceduralVFX.SparkleFall(p, CGreen);
+                        ProceduralVFX.RingWave(p, CGreen, 1.6f, 0.4f);
+                        break;
+                    }
+                    case "buff":
+                    {
+                        // 서포터 버프: 대상 유닛 주위 회전 상승 나선(atk=붉은기 / shield=파란기).
+                        Vector3 p = UnitPos(snap, ev.target, UnitPos(snap, ev.uid, bossPos));
+                        Color c = ev.kind == "atk" ? CBuffAtk : CBuffShield;
+                        ProceduralVFX.Spiral(p, c);
+                        ProceduralVFX.RingWave(p, c, 1.3f, 0.35f);
                         break;
                     }
                     case "counter_success":
@@ -161,13 +198,14 @@ namespace BossRaid
         }
 
         /// <summary>
-        /// 설치기 스킬 시전 이펙트 (type=="player_skill_cast"). 로아식 "지점 발동" 가독성:
-        ///   (a) 시전자(딜러)→지점 투사체 트레일   (skill2 는 하늘 낙하)
-        ///   (b) 임팩트 지점에 실판정 반경 원 데칼 플래시(0.2s) — hit=true 골드/크리티컬 강조, 빗나감 옅게
-        ///   (c) 임팩트 버스트 + 실반경 링
-        /// 반경은 ev.radius(sim 단위)를 viewer.cellSize 로 월드 변환해 실제 판정과 일치시킨다.
-        /// skill_id: "basic"(평타 r1.2, 가벼운 은백) | "skill"(혈창 투척 r1.8) | "skill2"(혈월 낙하 r3.0).
-        /// "basic" 은 FireBasicAttack 로 분기(절제된 연출). 데미지 숫자는 별도 damage 이벤트가 처리.
+        /// 설치기 스킬 시전 이펙트 (type=="player_skill_cast"). 로아식 "지점 발동" 가독성 —
+        /// 핵심은 실제로 "날아가는" 투사체: 시전자/상공에서 임팩트 지점으로 투사체가 duration 동안 이동하고,
+        /// 도착 "순간"에 임팩트(데칼/버스트/링/셰이크)를 동기 발동한다. 데미지 숫자(별도 damage 이벤트)는
+        /// 지연 못 하므로 투사체를 짧게(≤0.35s) 유지해 괴리를 최소화.
+        ///   basic : 0.12s 직선, 작은 은백 구체            → ImpactBasic
+        ///   skill : 0.18s 직선+포물선(중간 +1.2), 진홍 창  → ImpactSkillQ
+        ///   skill2: 0.35s 조준점 상공 8m → 수직 낙하, 대형 붉은 구체 → ImpactSkillW
+        /// 반경 r 은 ev.radius(sim) × cellSize 로 월드 변환(실판정 일치).
         /// </summary>
         private void FirePlayerSkill(EventData ev, Vector3 bossPos)
         {
@@ -175,81 +213,206 @@ namespace BossRaid
             Vector3 p = ToWorld(ev.tx, ev.ty);
             float r = (ev.radius > 0f ? ev.radius : 1.8f) * cell;   // sim → 월드 반경(실판정 일치)
 
-            // 딜러 평타 설치기: Q/W 보다 가벼운 은백색 연출(스팸 가능 → 파티클 절제). 별도 처리 후 종료.
             if (ev.skill_id == "basic")
             {
-                FireBasicAttack(ev, p, r, bossPos);
-                return;
+                // 평타: 0.12s 직선, 작은 은백 구체 → 도착 시 절제된 임팩트.
+                LaunchProjectile(DealerCastOrigin(p), p, CSilver, 0.12f, 0.28f, 0f, TrajKind.Straight,
+                    () => ImpactBasic(ev, p, r, bossPos));
             }
-
-            // ── 명중/크리티컬에 따른 임팩트 데칼 강조 배선 ──
-            Color decalBase; Color decalOutline; float peakAlpha;
-            if (ev.hit && ev.crit)  { decalBase = CGold; decalOutline = CGold * 3.2f;  peakAlpha = 0.9f; }
-            else if (ev.hit)        { decalBase = CGold; decalOutline = CGold * 2.2f;  peakAlpha = 0.6f; }
-            else                    { decalBase = CCyan; decalOutline = CCyan * 1.6f;  peakAlpha = 0.28f; } // 빗나감 옅게
-
-            if (ev.skill_id == "skill2")
+            else if (ev.skill_id == "skill2")
             {
-                // 혈월 낙하: (a) 하늘에서 떨어지는 낙하 스트릭(y+3 → 지면).
-                ProceduralVFX.Trail(p + Vector3.up * 3f, p, CCrimson);
-                ProceduralVFX.Burst(p, CCrimson, 44, 8f, 0.5f, 0.55f);
-                ProceduralVFX.RingWave(p, CCrimson, r, 0.45f);   // (c) 실반경 링
-                ProceduralVFX.Debris(p, CBrown);
-                LostArkCamera.ShakeCamera(0.35f, 0.25f);
+                // W 혈월: 조준점 상공 8m 에서 수직 낙하(가속), 크고 붉은 구체 → 도착 시 대형 슬램 임팩트.
+                Vector3 from = p + Vector3.up * 8f;
+                LaunchProjectile(from, p, CCrimson, 0.35f, 0.9f, 0f, TrajKind.Drop,
+                    () => ImpactSkillW(ev, p, r, bossPos));
             }
             else
             {
-                // 혈창 투척: (a) 시전자(딜러)→지점 투사체 트레일 + 금색-진홍 중형 버스트.
-                ProceduralVFX.Trail(DealerCastOrigin(p), p, CCrimson);
-                ProceduralVFX.Burst(p, CGold, 26, 6f, 0.4f, 0.45f);
-                ProceduralVFX.Burst(p, CCrimson, 16, 4.5f, 0.35f, 0.4f);
-                ProceduralVFX.RingWave(p, CGold, r, 0.35f);       // (c) 실반경 링
+                // Q 혈창: 0.18s 직선+살짝 포물선(중간 높이 +1.2), 길쭉한 진홍 창 → 도착 시 관통 임팩트.
+                LaunchProjectile(DealerCastOrigin(p), p, CCrimson, 0.18f, 0.45f, 1.2f, TrajKind.Arc,
+                    () => ImpactSkillQ(ev, p, r, bossPos));
             }
+        }
 
-            // (b) 임팩트 실판정 반경 데칼 플래시(0.2s).
-            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.2f);
+        // ─────────────── 스킬 임팩트(투사체 도착 콜백에서 동기 실행) ───────────────
 
-            // 보스 명중 강조: 스파크 + (크리티컬이면) 히트스톱/셰이크.
+        /// <summary>평타 도착 임팩트: 절제하되 명중/크리/빗나감을 명확히 구분.</summary>
+        private void ImpactBasic(EventData ev, Vector3 p, float r, Vector3 bossPos)
+        {
+            Color decalBase, decalOutline; float peakAlpha;
+            if (ev.hit && ev.crit)  { decalBase = CGold;   decalOutline = CGold * 2.8f;   peakAlpha = 0.75f; }
+            else if (ev.hit)        { decalBase = CSilver; decalOutline = CSilver * 1.9f; peakAlpha = 0.5f; }
+            else                    { decalBase = CBrown;  decalOutline = CBrown * 1.2f;  peakAlpha = 0.22f; } // 빗나감 흙먼지
+            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.28f);   // 바닥 잔광(페이드아웃)
+
             if (ev.hit)
             {
-                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CGold, 20, 5f, 0.3f, 0.35f);
+                ProceduralVFX.Burst(p, CSilver, 16, 4.5f, 0.28f, 0.35f);          // 버스트 상향
+                ProceduralVFX.RingWave(p, CSilver, r * 1.15f, 0.3f);             // 링 확대
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CSilver, 10, 3.5f, 0.22f, 0.3f);
+                LostArkCamera.ShakeCamera(0.06f * (ev.crit ? 1.5f : 1f), 0.13f);  // 소폭(크리 1.5배)
                 if (ev.crit)
                 {
-                    ProceduralVFX.Burst(p, CGold, 28, 7f, 0.4f, 0.4f);
-                    HitStopManager.HitStop(0.09f);
-                    LostArkCamera.ShakeCamera(0.3f, 0.2f);
+                    ProceduralVFX.Burst(p, CGold, 30, 7f, 0.42f, 0.4f);          // 플래시성 대형 버스트
+                    HitStopManager.HitStop(0.05f);
                 }
+            }
+            else
+            {
+                ProceduralVFX.Burst(p, CBrown, 8, 2.5f, 0.2f, 0.35f);            // 빗나감: 약한 흙먼지
             }
         }
 
-        /// <summary>
-        /// 딜러 평타 설치기 임팩트 (skill_id=="basic"). Q/W 보다 절제된 은백색 연출:
-        ///   (a) 딜러→지점 소형 은백 트레일
-        ///   (b) 실판정 반경(aim_basic_radius×cellSize) 소형 임팩트 데칼 플래시(짧게)
-        ///   (c) 소량 파티클 버스트 + 명중 시 보스 소형 스파크(크리만 약한 히트스톱)
-        /// 스팸 대비: 파티클 수/지속을 낮게 유지, RingWave·카메라 셰이크 없음.
-        /// </summary>
-        private void FireBasicAttack(EventData ev, Vector3 p, float r, Vector3 bossPos)
+        /// <summary>Q 혈창 도착 임팩트: 금-진홍 관통 폭발 + 반경 링/잔광.</summary>
+        private void ImpactSkillQ(EventData ev, Vector3 p, float r, Vector3 bossPos)
         {
-            // (a) 소형 은백 트레일.
-            ProceduralVFX.Trail(DealerCastOrigin(p), p, CSilver);
-
-            // (b) 명중/크리에 따른 소형 임팩트 데칼(짧은 플래시).
-            Color decalBase; Color decalOutline; float peakAlpha;
-            if (ev.hit && ev.crit)  { decalBase = CGold;   decalOutline = CGold * 2.6f;   peakAlpha = 0.7f; }
-            else if (ev.hit)        { decalBase = CSilver; decalOutline = CSilver * 1.8f; peakAlpha = 0.5f; }
-            else                    { decalBase = CCyan;   decalOutline = CCyan * 1.3f;   peakAlpha = 0.2f; }
-            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.16f);
-
-            // (c) 절제된 버스트.
-            ProceduralVFX.Burst(p, CSilver, 10, 3.5f, 0.22f, 0.3f);
+            Color decalBase, decalOutline; float peakAlpha;
+            if (ev.hit && ev.crit)  { decalBase = CGold;  decalOutline = CGold * 3.4f;  peakAlpha = 0.95f; }
+            else if (ev.hit)        { decalBase = CGold;  decalOutline = CGold * 2.4f;  peakAlpha = 0.65f; }
+            else                    { decalBase = CBrown; decalOutline = CBrown * 1.3f; peakAlpha = 0.28f; }
+            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.35f);   // 잔광 0.35s
 
             if (ev.hit)
             {
-                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CSilver, 8, 3.2f, 0.2f, 0.28f);
-                if (ev.crit) HitStopManager.HitStop(0.04f);   // 크리만 짧은 히트스톱(스팸 자극 최소)
+                ProceduralVFX.Burst(p, CGold, 34, 7.5f, 0.45f, 0.5f);            // 버스트 상향
+                ProceduralVFX.Burst(p, CCrimson, 22, 5.5f, 0.4f, 0.45f);
+                ProceduralVFX.RingWave(p, CGold, r * 1.25f, 0.4f);              // 반경 확대
+                ProceduralVFX.Debris(p, CCrimson);
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CGold, 22, 5.5f, 0.32f, 0.38f);
+                LostArkCamera.ShakeCamera(0.12f * (ev.crit ? 1.5f : 1f), 0.16f);
+                if (ev.crit)
+                {
+                    ProceduralVFX.Burst(p, CGold, 40, 9f, 0.55f, 0.45f);        // 크리 대형 플래시
+                    HitStopManager.HitStop(0.09f);                              // 기존 크리 히트스톱 유지
+                }
+            }
+            else
+            {
+                ProceduralVFX.Burst(p, CBrown, 14, 3.5f, 0.3f, 0.45f);          // 빗나감 흙먼지
+                ProceduralVFX.RingWave(p, CBrown, r * 0.9f, 0.35f);
             }
         }
+
+        /// <summary>W 혈월 도착 임팩트: 대형 슬램(강한 셰이크/히트스톱 + 이중 링 + 잔광).</summary>
+        private void ImpactSkillW(EventData ev, Vector3 p, float r, Vector3 bossPos)
+        {
+            Color decalBase, decalOutline; float peakAlpha;
+            if (ev.hit && ev.crit)  { decalBase = CCrimson; decalOutline = CRed * 3.2f;  peakAlpha = 0.95f; }
+            else if (ev.hit)        { decalBase = CCrimson; decalOutline = CRed * 2.3f;  peakAlpha = 0.7f; }
+            else                    { decalBase = CBrown;   decalOutline = CBrown * 1.3f; peakAlpha = 0.3f; }
+            FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.35f);   // 잔광 0.35s
+
+            // 슬램은 명중 여부와 무관하게 지면 충격(무게감).
+            ProceduralVFX.Burst(p, CCrimson, 52, 9f, 0.6f, 0.6f);               // 버스트 대폭 상향
+            ProceduralVFX.RingWave(p, CCrimson, r * 1.3f, 0.5f);               // 반경 확대(외곽)
+            ProceduralVFX.RingWave(p, CRed, r * 0.7f, 0.35f);                  // 이중 링(내곽)
+            ProceduralVFX.Debris(p, CBrown);
+            LostArkCamera.ShakeCamera(0.25f * (ev.crit ? 1.5f : 1f), 0.28f);    // 강한 셰이크
+            HitStopManager.HitStop(ev.crit ? 0.12f : 0.07f);                    // 무게감(크리 유지)
+
+            if (ev.crit)
+            {
+                Flash(CRed, 0.35f);
+                ProceduralVFX.Burst(p, CGold, 44, 10f, 0.65f, 0.5f);           // 크리 대형 플래시
+            }
+            if (ev.hit)
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CCrimson, 24, 6f, 0.35f, 0.4f);
+        }
+
+        // ─────────────── 투사체 발사 + 풀링 ───────────────
+
+        private enum TrajKind { Straight, Arc, Drop }
+
+        // 재사용 가능한 투사체(발광 파티클 트레일 GO). 평타 스팸 대비 GO/머티리얼 재사용으로 GC 압박 해소.
+        private class PooledProjectile { public GameObject go; public ParticleSystem ps; public bool inUse; }
+        private readonly List<PooledProjectile> _projPool = new List<PooledProjectile>();
+        private const float ProjectileFade = 0.3f;   // 도착 후 트레일 소멸 대기(초, unscaled)
+
+        /// <summary>투사체를 from→to 로 duration 동안 실제 이동시키고, 도착 시 onArrive 임팩트를 발동.</summary>
+        private void LaunchProjectile(Vector3 from, Vector3 to, Color color, float duration, float size,
+            float arcHeight, TrajKind kind, System.Action onArrive)
+        {
+            var pp = GetProjectile(from, to, color, duration, size);
+            StartCoroutine(MoveProjectile(pp, from, to, duration, arcHeight, kind, onArrive));
+        }
+
+        private PooledProjectile GetProjectile(Vector3 from, Vector3 to, Color color, float duration, float size)
+        {
+            PooledProjectile pp = null;
+            for (int i = 0; i < _projPool.Count; i++)
+                if (!_projPool[i].inUse) { pp = _projPool[i]; break; }
+
+            if (pp == null)
+            {
+                // 신규 생성: ProceduralVFX 는 비주얼만 생성. 풀에 등록해 이후 재사용.
+                var go = ProceduralVFX.Projectile(from, to, color, duration, size);
+                go.transform.SetParent(transform, true);
+                pp = new PooledProjectile { go = go, ps = go.GetComponent<ParticleSystem>() };
+                _projPool.Add(pp);
+            }
+            else
+            {
+                // 재사용: 위치/색/크기/잔상 길이만 재설정 후 Clear/Play (새 GO·머티리얼 생성 없음).
+                pp.go.SetActive(true);
+                pp.go.transform.position = from;
+                Vector3 dir = to - from;
+                if (dir.sqrMagnitude > 1e-6f)
+                    pp.go.transform.rotation = Quaternion.LookRotation(dir.normalized);
+                if (pp.ps != null)
+                {
+                    var main = pp.ps.main;
+                    main.startColor = HdrColor(color, 2.6f);
+                    main.startSize = Mathf.Max(0.05f, size);
+                    main.startLifetime = Mathf.Clamp(duration * 0.9f, 0.12f, 0.35f);
+                    pp.ps.Clear();
+                    pp.ps.Play();
+                }
+            }
+            pp.inUse = true;
+            return pp;
+        }
+
+        private System.Collections.IEnumerator MoveProjectile(PooledProjectile pp, Vector3 from, Vector3 to,
+            float duration, float arcHeight, TrajKind kind, System.Action onArrive)
+        {
+            duration = Mathf.Max(0.02f, duration);
+            float t = 0f;
+            // 비행은 unscaled 로 구동 — 동시 히트스톱에도 실제 비행 시간이 늘지 않아 데미지 숫자와 괴리 최소.
+            while (pp.go != null && t < duration)
+            {
+                float k = t / duration;
+                Vector3 pos;
+                switch (kind)
+                {
+                    case TrajKind.Arc:                     // 직선 + 포물선(중간 높이 arcHeight)
+                        pos = Vector3.Lerp(from, to, k);
+                        pos.y += arcHeight * 4f * k * (1f - k);
+                        break;
+                    case TrajKind.Drop:                    // 수직 낙하(가속감)
+                        pos = Vector3.Lerp(from, to, k * k);
+                        break;
+                    default:                               // 직선
+                        pos = Vector3.Lerp(from, to, k);
+                        break;
+                }
+                pp.go.transform.position = pos;
+                t += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            if (pp.go != null) pp.go.transform.position = to;
+            onArrive?.Invoke();   // 도착 "순간" 임팩트 동기 발동
+
+            // 방출 정지 후 트레일이 자연 소멸하도록 잠시 대기 → 풀 반납.
+            if (pp.ps != null) pp.ps.Stop(true, ParticleSystemStopBehavior.StopEmitting);
+            float fade = 0f;
+            while (fade < ProjectileFade) { fade += Time.unscaledDeltaTime; yield return null; }
+            if (pp.go != null) pp.go.SetActive(false);
+            pp.inUse = false;
+        }
+
+        /// <summary>ProceduralVFX.Hdr 과 동일 규칙(재사용 시 startColor 재설정용).</summary>
+        private static Color HdrColor(Color c, float k) => new Color(c.r * k, c.g * k, c.b * k, c.a);
 
         /// <summary>혈창 투척의 투사체 시작점(딜러 손 높이). 딜러 미탐색 시 지점 상공으로 폴백.</summary>
         private Vector3 DealerCastOrigin(Vector3 fallbackPoint)
@@ -261,47 +424,75 @@ namespace BossRaid
 
         // ─────────────── 임팩트 반경 데칼 플래시 ───────────────
 
+        // 재사용 가능한 임팩트 데칼(GO + 전용 Material). 평타 스팸 시 생성/파괴 GC 를 없애기 위해 풀링.
+        // 색/알파는 인스턴스별로 애니메이션하므로 머티리얼은 데칼당 1개(재사용, 재생성 안 함).
+        private class PooledDecal { public GameObject go; public Material mat; public bool inUse; }
+        private readonly List<PooledDecal> _decalPool = new List<PooledDecal>();
+
         /// <summary>
-        /// 임팩트 지점에 실판정 반경 크기의 원 데칼을 dur 초간 밝게 플래시(페이드아웃 후 자동 파괴).
+        /// 임팩트 지점에 실판정 반경 크기의 원 데칼을 dur 초간 밝게 플래시(페이드아웃 후 풀 반납).
         /// BossRaid/Telegraph 셰이더 circle(_Fill=1) 재활용. 셰이더 미포함 시 Sprites/Default 폴백.
         /// </summary>
         private void FlashImpactDecal(Vector3 pos, float worldRadius, Color baseCol, Color outlineCol,
             float peakAlpha, float dur)
         {
-            var go = BuildCircleDecal(pos, worldRadius, baseCol, outlineCol, out var mat);
-            StartCoroutine(ImpactDecalRoutine(go, mat, baseCol, outlineCol, peakAlpha, Mathf.Max(0.05f, dur)));
+            var d = GetDecal();
+            float diam = Mathf.Max(0.02f, worldRadius * 2f);
+            d.go.transform.position = new Vector3(pos.x, 0.03f, pos.z);
+            d.go.transform.localScale = new Vector3(diam, diam, diam);
+            StartCoroutine(ImpactDecalRoutine(d, baseCol, outlineCol, peakAlpha, Mathf.Max(0.05f, dur)));
         }
 
-        private System.Collections.IEnumerator ImpactDecalRoutine(GameObject go, Material mat,
+        private PooledDecal GetDecal()
+        {
+            for (int i = 0; i < _decalPool.Count; i++)
+                if (!_decalPool[i].inUse)
+                {
+                    _decalPool[i].inUse = true;
+                    _decalPool[i].go.SetActive(true);
+                    return _decalPool[i];
+                }
+
+            var pd = new PooledDecal { go = BuildCircleDecal(out var mat), mat = mat, inUse = true };
+            _decalPool.Add(pd);
+            return pd;
+        }
+
+        private System.Collections.IEnumerator ImpactDecalRoutine(PooledDecal d,
             Color baseCol, Color outlineCol, float peakAlpha, float dur)
         {
             float t = 0f;
-            while (go != null && t < dur)
+            while (d.go != null && t < dur)
             {
                 float k = t / dur;
                 float a = peakAlpha * (1f - k * k);   // 빠른 감쇠
-                if (mat != null)
-                {
-                    Color b = baseCol; b.a = a;
-                    Color o = outlineCol; o.a = a;
-                    mat.SetColor("_Color", b);
-                    mat.SetColor("_OutlineColor", o);
-                }
+                SetDecalColor(d.mat, baseCol, outlineCol, a);
                 t += Time.deltaTime;
                 yield return null;
             }
-            if (go != null) Destroy(go);
+            if (d.go != null) d.go.SetActive(false);
+            d.inUse = false;
         }
 
-        /// <summary>바닥에 눕힌 원형 Quad 데칼 GO 생성(Telegraph 셰이더 circle, _Fill=1).</summary>
-        private GameObject BuildCircleDecal(Vector3 pos, float worldRadius, Color baseCol, Color outlineCol,
-            out Material mat)
+        /// <summary>데칼 머티리얼 색/알파 갱신(Telegraph 셰이더 우선, Sprites/Default 폴백).</summary>
+        private static void SetDecalColor(Material mat, Color baseCol, Color outlineCol, float a)
+        {
+            if (mat == null) return;
+            Color b = baseCol; b.a = a;
+            if (mat.HasProperty("_Color")) mat.SetColor("_Color", b);
+            else mat.color = b;
+            if (mat.HasProperty("_OutlineColor"))
+            {
+                Color o = outlineCol; o.a = a;
+                mat.SetColor("_OutlineColor", o);
+            }
+        }
+
+        /// <summary>바닥에 눕힌 원형 Quad 데칼 GO + 전용 Material 을 1회 생성(색은 이후 SetDecalColor 로 갱신).</summary>
+        private GameObject BuildCircleDecal(out Material mat)
         {
             var go = new GameObject("VFX_ImpactDecal");
             go.transform.SetParent(transform, false);
-            float d = Mathf.Max(0.02f, worldRadius * 2f);
-            go.transform.position = new Vector3(pos.x, 0.03f, pos.z);
-            go.transform.localScale = new Vector3(d, d, d);
 
             var mf = go.AddComponent<MeshFilter>();
             var mr = go.AddComponent<MeshRenderer>();
@@ -318,12 +509,6 @@ namespace BossRaid
                 mat.SetFloat("_Pulse", 0f);
                 mat.SetFloat("_OutlineWidth", 0.10f);
                 mat.SetFloat("_UnfilledAlpha", 0.8f);
-                mat.SetColor("_Color", baseCol);
-                mat.SetColor("_OutlineColor", outlineCol);
-            }
-            else
-            {
-                mat.color = baseCol;
             }
             mr.sharedMaterial = mat;
             mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;

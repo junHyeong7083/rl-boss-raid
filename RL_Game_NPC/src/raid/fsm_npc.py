@@ -131,6 +131,21 @@ class FSMNpcPolicy:
         d = math.hypot(dirx, diry) or 1.0
         tx = p.x + dirx / d * (p.radius + 0.5)
         ty = p.y + diry / d * (p.radius + 0.5)
+
+        # 기둥에 이미 붙어 있으면(직선 접근이 기둥 몸통에 막힘) 둘레를 따라 접선 우회:
+        # 현재 각도에서 목표 각도(보스 반대편) 쪽으로 호를 그리며 돈다. 반경은 충돌
+        # 한계(u.radius + p.radius)보다 여유 있게 잡아 슬라이딩 없이도 진행 가능.
+        dist_p = _euclid(u.x, u.y, p.x, p.y)
+        # 우회 발동 반경: 한 스텝(1.0) 전진이 기둥 충돌권에 걸릴 수 있는 거리까지 넉넉히.
+        if dist_p <= p.radius + u.radius + 1.15:
+            ang_u = math.atan2(u.y - p.y, u.x - p.x)
+            ang_t = math.atan2(diry, dirx)                    # 은신 지점 방향(보스 반대편)
+            diff = (ang_t - ang_u + math.pi) % (2 * math.pi) - math.pi
+            if abs(diff) > 0.15:                              # 아직 반대편이 아님 → 호 이동
+                step = 0.6 if diff > 0 else -0.6
+                orbit_r = p.radius + u.radius + 0.45
+                tx = p.x + math.cos(ang_u + step) * orbit_r
+                ty = p.y + math.sin(ang_u + step) * orbit_r
         return self._move_toward(u, tx, ty)
 
     def _counter_action(self, u) -> int:
