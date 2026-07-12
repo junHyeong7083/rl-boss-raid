@@ -23,8 +23,12 @@ namespace BossRaid
     ///           마우스 지면 포인트를 그대로 SendActionAimed(9, tx, ty) 로 보내면 서버가 "방향"만 취해
     ///           고정 사거리 라인 공격을 낸다(조준 모드 불요, 쿨 없음). 연타는 0.12s 최소 간격 가드.
     ///   G = 패링(21, 즉시 — 조준/방향 불요, 서버가 facing 판정. cd "parry" 10턴).
-    ///   조준 중: 좌클릭 = 발사(평타보다 우선), 같은 키 재입력/Esc = 취소, 다른 조준 스킬 키 = 대상 전환,
-    ///            우클릭 이동은 그대로 동작(무빙 조준). 대시/패링은 조준 중에도 조준을 유지한 채 발동.
+    ///   조준 중: 좌클릭 = 발사(평타보다 우선), 같은 키 재입력 = 현재 레티클 위치로 즉시 발사(Q 조준→Q 발동),
+    ///            Esc = 취소, 다른 조준 스킬 키 = 대상 전환, 우클릭 이동은 그대로 동작(무빙 조준).
+    ///            대시/패링은 조준 중에도 조준을 유지한 채 발동.
+    ///   입력 버퍼: 스킬/대시/패링 키를 눌렀을 때 유효 쿨이 소량(≤bufferWindowTurns)이면 거부 대신 버퍼링해
+    ///            쿨이 풀리는 순간 자동 실행(조준형=조준 진입, 즉발형=발동). 평타는 스로틀에 막히면 1회 버퍼.
+    ///            버퍼는 최신 1개만·유효시간 bufferValidTime, 조준 진입/취소 시 초기화. 쿨이 많이 남으면 흔들림.
     ///   Space = 평타에서 제거(재량 결정). 평타 전용 키는 basicAttackKey(기본 C) 하나 — 원하면 인스펙터에서
     ///           KeyCode.Space 로 바꾸거나 KeyCode.None 으로 비활성(좌클릭만 사용) 가능.
     ///
@@ -54,6 +58,27 @@ namespace BossRaid
             public float range;          // 사거리 (sim 단위, aimed 전용)
             public float aoeRadius;      // AoE 반경 (sim 단위, aimed 전용)
             public int maxCooldown;      // 쿨다운(턴) — 클라이언트 예측 쿨 시작값
+            public Color aimColor;       // 조준 시 화면 외곽 발광 색(HDR). 씬 직렬화 누락(alpha 0) 시 팔레트 폴백.
+        }
+
+        // ─────────────── 조준 외곽 발광 팔레트 (HDR — 블룸 대응) ───────────────
+        // Q 진홍 / W 붉은 대형(더 진하게) / R 궁극 금색 / 평타·폴백 은백.
+        private static readonly Color AimCrimson = new Color(1.9f, 0.16f, 0.13f, 1f);  // Q 혈창: 진홍
+        private static readonly Color AimDeepRed = new Color(2.4f, 0.06f, 0.05f, 1f);  // W 혈월 낙하: 더 진한 붉은
+        private static readonly Color AimGold    = new Color(2.1f, 1.5f, 0.45f, 1f);   // R 처형: 금색
+        private static readonly Color AimSilver  = new Color(1.4f, 1.5f, 1.7f, 1f);    // 폴백: 은백
+
+        /// <summary>스킬 조준 외곽색 결정: aimColor.alpha 0(씬 직렬화 누락) 이면 cooldownKey 팔레트로 폴백.</summary>
+        private static Color ResolveAimColor(SkillBinding sk)
+        {
+            if (sk.aimColor.a > 0.001f) return sk.aimColor;   // 코드/인스펙터 지정값 우선
+            switch (sk.cooldownKey)                            // 씬 직렬화로 (0,0,0,0) 들어온 경우 폴백
+            {
+                case "skill":  return AimCrimson;   // Q
+                case "skill2": return AimDeepRed;   // W
+                case "ult":    return AimGold;      // R
+                default:       return AimSilver;
+            }
         }
 
         [Header("Scene Refs (비우면 자동 탐색/생성)")]
@@ -71,10 +96,10 @@ namespace BossRaid
         [SerializeField]
         private SkillBinding[] skills = new SkillBinding[]
         {
-            new SkillBinding { label = "혈창 투척", key = KeyCode.Q, actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20 },
-            new SkillBinding { label = "혈월 낙하", key = KeyCode.W, actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40 },
+            new SkillBinding { label = "혈창 투척", key = KeyCode.Q, actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20,  aimColor = AimCrimson },
+            new SkillBinding { label = "혈월 낙하", key = KeyCode.W, actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40,  aimColor = AimDeepRed },
             new SkillBinding { label = "카운터",   key = KeyCode.E, actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 25 },
-            new SkillBinding { label = "혈월 처형", key = KeyCode.R, actionId = 20, cooldownKey = "ult",     aimed = true,  range = 9f, aoeRadius = 4.0f, maxCooldown = 200 },
+            new SkillBinding { label = "혈월 처형", key = KeyCode.R, actionId = 20, cooldownKey = "ult",     aimed = true,  range = 9f, aoeRadius = 4.0f, maxCooldown = 200, aimColor = AimGold },
         };
 
         [Header("Dash (Shift, 즉발 방향기 — skills 배열과 별도 처리)")]
@@ -106,6 +131,12 @@ namespace BossRaid
         [SerializeField] private string parryCooldownKey = "parry";
         [Tooltip("패링 클라 예측 쿨다운(턴). 서버 10턴.")]
         [SerializeField] private int parryCooldown = 10;
+
+        [Header("Input Buffering (씹힘 방지 — 격투/플랫포머식)")]
+        [Tooltip("유효 쿨다운이 이 턴 이하로 남았을 때 키 입력을 거부/흔들림 대신 버퍼링(쿨 풀리는 순간 자동 실행). 기본 1턴≈0.3s.")]
+        [SerializeField] private int bufferWindowTurns = 1;
+        [Tooltip("버퍼 유효시간(초). 이 시간을 넘기면 버퍼 폐기(씹힘 대신 만료). 기본 0.35s.")]
+        [SerializeField] private float bufferValidTime = 0.35f;
 
         [Header("Movement")]
         [Tooltip("지면 평면 높이(y). 스냅샷 렌더는 y=0 평면을 쓴다.")]
@@ -147,6 +178,14 @@ namespace BossRaid
         private int _lastSentMoveAction = -1;         // 즉시 전송 중복 방지(드래그 중 같은 방향이면 스킵)
         private SkillBinding _aiming;                 // 현재 조준 중인 스킬 (null = 조준 아님)
         private float _lastBasicAttackTime = -999f;    // 평타 연타 스팸 가드용 마지막 전송 시각(unscaled)
+
+        // ── 입력 버퍼(씹힘 방지) ── 최신 1개만 유지(덮어쓰기). 조준 진입/취소 시 초기화.
+        private enum BufferKind { None, Skill, Dash, Parry }
+        private BufferKind _bufKind = BufferKind.None;   // 버퍼된 액션 종류
+        private SkillBinding _bufSkill;                  // BufferKind.Skill 일 때 대상 스킬
+        private float _bufTime;                          // 버퍼된 시각(unscaled) — bufferValidTime 초과 시 폐기
+        private bool _bufBasicAttack;                    // 스로틀에 막힌 평타 1회 버퍼
+        private float _bufBasicTime;                     // 평타 버퍼 시각(unscaled)
 
         private void Awake()
         {
@@ -256,10 +295,14 @@ namespace BossRaid
                 }
                 _predictor?.ClearMoveIntent();
                 if (_aiming != null) CancelAiming();
+                ResetInputBuffers();
                 return;
             }
 
-            // 1) 스킬 키: 조준형은 조준 모드 진입/취소/전환, 즉시형은 즉시 전송. 쿨다운 가드.
+            // 0) 입력 버퍼 소화: 쿨/스로틀이 풀리는 순간 버퍼된 액션 자동 실행(씹힘 방지).
+            ProcessInputBuffer();
+
+            // 1) 스킬 키: 조준형은 조준 진입/재입력 발동/전환, 즉시형은 즉시 전송. 쿨 소량이면 버퍼.
             HandleSkillInput();
 
             // 2) 평타(좌클릭/C): 조준 모드가 아닐 때만 좌클릭 소비. 조준 모드 중 좌클릭은 (3)의 발사 확정이 우선.
@@ -322,28 +365,98 @@ namespace BossRaid
                 if (sk == null) continue;
                 if (!WasKeyPressedThisFrame(sk.key)) continue;
 
-                // 같은 키 재입력 = 조준 취소 (쿨다운 무관).
-                if (sk.aimed && _aiming == sk) { CancelAiming(); break; }
-
-                // 쿨다운 가드: 서버 값과 클라 예측 쿨 중 큰 값. 쿨 중이면 흔들림 피드백.
-                if (GetEffectiveCooldown(sk) > 0)
+                // 같은 키 재입력 = 현재 레티클 위치로 즉시 발사 (Q 조준 → Q 발동). 취소는 Esc.
+                if (sk.aimed && _aiming == sk)
                 {
-                    skillBar?.Shake(sk.cooldownKey);
+                    if (aimIndicator != null) FireAimedSkill(sk, aimIndicator.ClampedAimPoint);
                     break;
                 }
 
-                if (sk.aimed)
+                // 쿨다운 3분기: 0=즉시 실행 / 소량(≤버퍼창)=버퍼 / 많이 남음=거부(흔들림).
+                int cd = GetEffectiveCooldown(sk);
+                if (cd == 0)            ExecuteSkill(sk);
+                else if (cd <= bufferWindowTurns) BufferSkill(sk);
+                else                    skillBar?.Shake(sk.cooldownKey);
+                break;                  // 한 프레임에 스킬 하나만
+            }
+        }
+
+        /// <summary>스킬 실행(쿨 0 확인 후): 조준형은 조준 진입, 즉시형은 전송 + 예측 쿨.</summary>
+        private void ExecuteSkill(SkillBinding sk)
+        {
+            if (sk.aimed)
+            {
+                EnterAiming(sk);   // 조준 진입 (다른 스킬 조준 중이었으면 대상 전환)
+            }
+            else
+            {
+                RaidSession.Instance?.SendAction(sk.actionId);
+                skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
+                _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
+            }
+        }
+
+        // ─────────────── 입력 버퍼(씹힘 방지) ───────────────
+
+        private void BufferSkill(SkillBinding sk)
+        {
+            _bufKind = BufferKind.Skill;
+            _bufSkill = sk;
+            _bufTime = Time.unscaledTime;
+        }
+
+        private void BufferAction(BufferKind kind)
+        {
+            _bufKind = kind;
+            _bufSkill = null;
+            _bufTime = Time.unscaledTime;
+        }
+
+        /// <summary>조준 진입/취소/전투 종료 시 모든 버퍼 초기화.</summary>
+        private void ResetInputBuffers()
+        {
+            _bufKind = BufferKind.None;
+            _bufSkill = null;
+            _bufBasicAttack = false;
+        }
+
+        /// <summary>
+        /// 매 프레임 버퍼 소화: 유효시간 초과 폐기, 쿨/스로틀이 풀리는 순간 버퍼된 액션 자동 실행.
+        /// 스킬(조준형이면 조준 진입/즉발이면 발동)·대시·패링·평타 스로틀 버퍼를 처리.
+        /// </summary>
+        private void ProcessInputBuffer()
+        {
+            float now = Time.unscaledTime;
+
+            // 평타 스로틀 버퍼: 스로틀 해제 즉시 발사(유효창 내).
+            if (_bufBasicAttack)
+            {
+                if (now - _bufBasicTime > bufferValidTime) _bufBasicAttack = false;
+                else if (now - _lastBasicAttackTime >= basicAttackMinInterval)
                 {
-                    EnterAiming(sk);   // 조준 진입 (다른 스킬 조준 중이었으면 대상 전환)
+                    _bufBasicAttack = false;
+                    FireBasicAttack();
                 }
-                else
-                {
-                    // 즉시형(E 카운터): 조준 없이 즉시 전송.
-                    RaidSession.Instance?.SendAction(sk.actionId);
-                    skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
-                    _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
-                }
-                break;                           // 한 프레임에 스킬 하나만
+            }
+
+            if (_bufKind == BufferKind.None) return;
+            if (now - _bufTime > bufferValidTime) { _bufKind = BufferKind.None; _bufSkill = null; return; }   // 유효창 초과 폐기
+
+            switch (_bufKind)
+            {
+                case BufferKind.Skill:
+                    if (_bufSkill != null && GetEffectiveCooldown(_bufSkill) == 0)
+                    {
+                        var sk = _bufSkill; _bufKind = BufferKind.None; _bufSkill = null;
+                        ExecuteSkill(sk);   // 조준형=조준 진입 / 즉발형=발동
+                    }
+                    break;
+                case BufferKind.Dash:
+                    if (GetDashCooldown() == 0) { _bufKind = BufferKind.None; DoDash(); }
+                    break;
+                case BufferKind.Parry:
+                    if (GetParryCooldown() == 0) { _bufKind = BufferKind.None; DoParry(); }
+                    break;
             }
         }
 
@@ -371,16 +484,18 @@ namespace BossRaid
         {
             _aiming = sk;
             float cell = viewer != null ? viewer.cellSize : 1f;
-            aimIndicator?.Show(sk.range * cell, sk.aoeRadius * cell);
+            aimIndicator?.Show(sk.range * cell, sk.aoeRadius * cell, ResolveAimColor(sk));
             skillBar?.SetAimHighlight(sk.cooldownKey);
+            ResetInputBuffers();   // 조준 진입 시 버퍼 초기화
         }
 
-        /// <summary>조준 취소(같은 키/Esc/전투 종료).</summary>
+        /// <summary>조준 취소(Esc/전투 종료).</summary>
         private void CancelAiming()
         {
             _aiming = null;
             aimIndicator?.Hide();
             skillBar?.SetAimHighlight(null);
+            ResetInputBuffers();   // 조준 취소 시 버퍼 초기화
         }
 
         /// <summary>조준 발사: 클램프 지점을 sim 좌표로 변환해 SendActionAimed + 예측 쿨 시작.</summary>
@@ -404,14 +519,17 @@ namespace BossRaid
         {
             if (!WasKeyPressedThisFrame(dashKey)) return;
 
-            // 쿨다운 가드: 서버 값과 클라 예측 쿨 중 큰 값. 쿨 중이면 흔들림 피드백(조준/이동 불변).
-            if (GetDashCooldown() > 0)
-            {
-                skillBar?.Shake(dashCooldownKey);
-                return;
-            }
+            // 쿨다운 3분기: 0=즉시 대시 / 소량(≤버퍼창)=버퍼 / 많이 남음=흔들림.
+            int cd = GetDashCooldown();
+            if (cd == 0)                     DoDash();
+            else if (cd <= bufferWindowTurns) BufferAction(BufferKind.Dash);
+            else                             skillBar?.Shake(dashCooldownKey);
+        }
 
-            if (!TryGetDashTarget(out Vector2 sim, out Vector3 worldDir)) return;
+        /// <summary>대시 실행(쿨 0 확인 후): 방향 지점 전송 + 예측 임펄스. 방향 없으면 무시(false).</summary>
+        private bool DoDash()
+        {
+            if (!TryGetDashTarget(out Vector2 sim, out Vector3 worldDir)) return false;
 
             RaidSession.Instance?.SendActionAimed(dashActionId, sim.x, sim.y);
             skillBar?.StartPredictedCooldown(dashCooldownKey, dashCooldown);
@@ -421,6 +539,7 @@ namespace BossRaid
             _predictor?.DashImpulse(worldDir, dashDistanceSim * cell);
 
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 조준은 유지.
+            return true;
         }
 
         /// <summary>대시 목표(sim 좌표)와 월드 방향 산출. 마우스 지면 포인트 우선, 없으면 현재 이동 방향.</summary>
@@ -485,7 +604,19 @@ namespace BossRaid
             bool byClick = _aiming == null && ReadLeftMouseDown();   // 조준 중 좌클릭은 발사 확정이 우선
             if (!byKey && !byClick) return;
 
-            if (Time.unscaledTime - _lastBasicAttackTime < basicAttackMinInterval) return;
+            // 연타 스로틀에 막히면 1회 버퍼(스로틀 해제 즉시 발사) → 빠른 연타 씹힘 제거.
+            if (Time.unscaledTime - _lastBasicAttackTime < basicAttackMinInterval)
+            {
+                _bufBasicAttack = true;
+                _bufBasicTime = Time.unscaledTime;
+                return;
+            }
+            FireBasicAttack();
+        }
+
+        /// <summary>평타 발사(스로틀 통과 후): 현재 마우스 지면 포인트를 방향 지시점으로 전송.</summary>
+        private void FireBasicAttack()
+        {
             if (!TryGetGroundPoint(out var pt)) return;
 
             Vector2 sim = WorldToSim(pt);
@@ -504,12 +635,16 @@ namespace BossRaid
         {
             if (!WasKeyPressedThisFrame(parryKey)) return;
 
-            if (GetParryCooldown() > 0)
-            {
-                skillBar?.Shake(parryCooldownKey);
-                return;
-            }
+            // 쿨다운 3분기: 0=즉시 패링 / 소량(≤버퍼창)=버퍼 / 많이 남음=흔들림.
+            int cd = GetParryCooldown();
+            if (cd == 0)                     DoParry();
+            else if (cd <= bufferWindowTurns) BufferAction(BufferKind.Parry);
+            else                             skillBar?.Shake(parryCooldownKey);
+        }
 
+        /// <summary>패링 실행(쿨 0 확인 후): 즉발 전송 + 예측 쿨.</summary>
+        private void DoParry()
+        {
             RaidSession.Instance?.SendAction(parryActionId);
             skillBar?.StartPredictedCooldown(parryCooldownKey, parryCooldown);
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 조준은 유지.

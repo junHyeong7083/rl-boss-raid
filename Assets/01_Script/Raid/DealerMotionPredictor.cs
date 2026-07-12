@@ -18,8 +18,11 @@ namespace BossRaid
     ///   - 이동 의도(SetMoveIntent) 동안 오프셋을 의도 방향으로 서버 속도만큼 전진(상한 maxOffset).
     ///   - 스냅샷 도착 시 오프셋 = 표시위치 − 권위 렌더 위치(AuthoritativePosition) 로 재계산 + 상한 클램프.
     ///     권위 위치는 보간이 진행되며 새 목표로 이어지므로, 오프셋이 자연히 소화되어 스냅샷 순간의
-    ///     후방 점프가 사라진다. 단, 표시위치 − 새 서버 목표 오차가 snapErrorThreshold 이상
-    ///     (서버가 이동 거부: 충돌/경직)이면 스냅 보정(오프셋 0).
+    ///     후방 점프가 사라진다. 단, 표시위치 − 새 서버 목표 오차가 크면 오차 크기에 따라 두 단계로 처리:
+    ///       · snapErrorThreshold(2.6) 이상 & hardSnapThreshold(3.0) 미만(서버가 이동 거부: 충돌/경직):
+    ///         '보정 모드'(_reconcile) — 즉시 오프셋 0 스냅(=순간이동 체감)이 아니라 LateUpdate 에서
+    ///         오프셋을 0 으로 지수 수렴(시간상수 reconcileTime 0.12s)해 부드럽게 제자리로 당긴다.
+    ///       · hardSnapThreshold(3.0) 이상(에피소드 리셋/텔레포트: 한 턴에 큰 점프): 진짜 스냅(오프셋 0).
     ///   - 의도 해제 시 지수 감쇠(decayTime)로 오프셋 0 수렴.
     ///   - InputEnabled false / 딜러 사망 시 예측 비활성 + 오프셋 즉시 0.
     ///
@@ -33,8 +36,12 @@ namespace BossRaid
         public float moveSpeed = 3.0f;
         [Tooltip("예측 오프셋 상한(유닛). 서버보다 1턴 이상 앞서가지 않게.")]
         public float maxOffset = 1.2f;
-        [Tooltip("스냅샷 보정 시 이 오차(유닛) 이상이면 스냅(오프셋 0). 서버 이동 거부 대응.")]
-        public float snapErrorThreshold = 2.0f;
+        [Tooltip("스냅샷 보정 시 이 오차(유닛) 이상이면 '보정 모드'(즉시 스냅 대신 지수 수렴). 서버 이동 거부 대응.")]
+        public float snapErrorThreshold = 2.6f;
+        [Tooltip("이 오차(유닛) 이상이면 진짜 순간이동(에피소드 리셋/텔레포트)으로 보고 즉시 스냅(오프셋 0).")]
+        public float hardSnapThreshold = 3.0f;
+        [Tooltip("보정 모드 오프셋→0 지수 수렴 시간 상수(초). 순간이동 체감 제거용.")]
+        public float reconcileTime = 0.12f;
         [Tooltip("의도 해제 시 오프셋 지수 감쇠 시간 상수(초).")]
         public float decayTime = 0.15f;
         [Tooltip("예측 중 이동 의도 방향으로 몸 방향 보정(후향 달리기 아티팩트 방지).")]
@@ -47,6 +54,12 @@ namespace BossRaid
                + "큰 오차 스냅/감쇠가 억제되어 화면이 먼저 훅 나간 뒤 서버가 스냅샷으로 자연히 따라온다.")]
         public float dashOffsetWindow = 0.5f;
 
+        [Header("방향 전환")]
+        [Tooltip("이동 의도 방향이 이전과 이 각도(도) 이상 달라지면 기존 오프셋의 '새 방향 수직 성분'을 즉시 감쇠(미끄러지는 관성 제거).")]
+        public float turnSharpAngleDeg = 60f;
+        [Tooltip("방향 급전환 시 수직 성분 즉시 감쇠율(0.6=60% 제거, 잔여 40%는 기존 감쇠 경로).")]
+        public float turnPerpDamp = 0.6f;
+
         // ─────────────── 내부 상태 ───────────────
         private Vector3 _offset;        // 권위 렌더 위치 대비 예측 오프셋
         private bool _hasIntent;        // 이동 의도 활성 여부
@@ -57,6 +70,7 @@ namespace BossRaid
         private UnitView _unitView;     // 같은 GameObject 의 UnitView(권위 렌더 위치 조회 계약)
         private float _dashMaxOffset;   // 대시 특례 오프셋 상한(월드) — 창 동안만 유효
         private float _dashWindowRemain;// 대시 특례 남은 시간(초, >0 이면 특례 적용 중)
+        private bool _reconcile;        // 보정 모드: 큰 오차 시 즉시 스냅 대신 LateUpdate 에서 오프셋을 0 으로 지수 수렴
 
         private void Awake()
         {
@@ -73,7 +87,24 @@ namespace BossRaid
         {
             worldDir.y = 0f;
             if (worldDir.sqrMagnitude < 1e-6f) { ClearMoveIntent(); return; }
-            _intentDir = worldDir.normalized;
+            Vector3 newDir = worldDir.normalized;
+
+            // 방향 전환 관성 제거: 새 의도 방향이 이전과 turnSharpAngleDeg 이상 달라지면
+            // 기존 오프셋 중 '새 방향에 수직인 성분'을 즉시 turnPerpDamp 만큼 감쇠한다
+            // (평행 성분과 잔여 수직분은 기존 누적/감쇠 경로 유지 → 꺾임이 즉답으로 느껴짐).
+            // 대시 창 중에는 선행 임펄스를 훼손하지 않도록 미적용.
+            if (_dashWindowRemain <= 0f && _intentDir.sqrMagnitude > 1e-6f && _offset.sqrMagnitude > 1e-6f)
+            {
+                float dot = Vector3.Dot(_intentDir, newDir);              // 단위벡터 내적 = cos(전환각)
+                if (dot < Mathf.Cos(turnSharpAngleDeg * Mathf.Deg2Rad))   // ≥ 임계각이면 급전환
+                {
+                    Vector3 parallel = Vector3.Dot(_offset, newDir) * newDir;
+                    Vector3 perp = _offset - parallel;                    // 새 방향 수직 성분
+                    _offset -= perp * Mathf.Clamp01(turnPerpDamp);        // 즉시 60% 제거
+                }
+            }
+
+            _intentDir = newDir;
             _hasIntent = true;
         }
 
@@ -94,6 +125,7 @@ namespace BossRaid
 
             _dashMaxOffset = Mathf.Max(maxOffset, distanceWorld);   // 특례 상한(대시 거리까지 허용)
             _dashWindowRemain = dashOffsetWindow;
+            _reconcile = false;                                     // 대시 특례가 보정 모드보다 우선
 
             _offset += worldDir.normalized * distanceWorld;          // 즉시 가산 → 선행 이동
             _offset = Vector3.ClampMagnitude(_offset, _dashMaxOffset);
@@ -111,26 +143,37 @@ namespace BossRaid
         public void OnServerSnapshot(Vector3 serverWorldPos, bool alive)
         {
             _alive = alive;
-            if (!alive || !InputOn()) { _offset = Vector3.zero; _hasIntent = false; _dashWindowRemain = 0f; return; }
+            if (!alive || !InputOn()) { _offset = Vector3.zero; _hasIntent = false; _dashWindowRemain = 0f; _reconcile = false; return; }
             if (!_hasDisplay) return;
 
             // 대시 특례 창에는 큰 오차 스냅을 억제한다. 대시는 의도적으로 큰 오프셋(≈distanceWorld)을
             // 만들며, 서버는 다음 스냅샷에 그 방향으로 이동해 오차를 소화한다. 창 밖에서만 스냅 보정.
             if (_dashWindowRemain <= 0f)
             {
-                // 큰 오차 판정은 새 서버 목표 기준(서버 이동 거부: 충돌/경직 대응).
+                // 큰 오차 판정은 새 서버 목표 기준(서버 이동 거부: 충돌/경직 / 또는 텔레포트 대응).
                 Vector3 snapErr = _displayPos - serverWorldPos;
                 snapErr.y = 0f;
-                if (snapErr.magnitude >= snapErrorThreshold)
+                float err = snapErr.magnitude;
+                if (err >= hardSnapThreshold)
                 {
-                    _offset = Vector3.zero;                               // 서버 거부/큰 오차 → 스냅 보정
+                    // 진짜 순간이동(에피소드 리셋/텔레포트, 한 턴 큰 점프) → 즉시 스냅.
+                    _offset = Vector3.zero;
+                    _reconcile = false;
+                    return;
+                }
+                if (err >= snapErrorThreshold)
+                {
+                    // 서버 이동 거부(충돌/경직) → 즉시 0 스냅(순간이동 체감) 대신 보정 모드로 전환.
+                    // 현재 오프셋을 유지한 채 LateUpdate 에서 reconcileTime 시간상수로 0 에 지수 수렴.
+                    _reconcile = true;
                     return;
                 }
             }
 
-            // 오프셋은 '권위 렌더 위치'(보간 중이라 목표보다 뒤에 있음) 기준으로 재계산.
+            // 정상 보정: 오프셋은 '권위 렌더 위치'(보간 중이라 목표보다 뒤에 있음) 기준으로 재계산.
             // 목표 기준으로 잡으면 스냅샷 순간 표시 위치가 (목표−보간위치)만큼 후방 점프하지만,
             // 렌더 위치 기준이면 표시 위치가 이번 프레임에도 연속으로 유지된다.
+            _reconcile = false;   // 오차가 정상 범위로 복귀 → 보정 모드 해제
             Vector3 auth = _unitView != null ? _unitView.AuthoritativePosition : serverWorldPos;
             Vector3 newOffset = _displayPos - auth;
             newOffset.y = 0f;
@@ -152,6 +195,14 @@ namespace BossRaid
             {
                 _offset = Vector3.zero;    // 전투 외/사망: 예측 비활성 + 즉시 0
                 _dashWindowRemain = 0f;
+                _reconcile = false;
+            }
+            else if (_reconcile)
+            {
+                // 보정 모드: 즉시 스냅 대신 오프셋을 0 으로 지수 수렴(순간이동 체감 제거).
+                float k = reconcileTime > 0f ? Mathf.Exp(-Time.deltaTime / reconcileTime) : 0f;
+                _offset *= k;
+                if (_offset.sqrMagnitude < 1e-6f) { _offset = Vector3.zero; _reconcile = false; }   // 수렴 완료 → 해제
             }
             else if (_hasIntent)
             {

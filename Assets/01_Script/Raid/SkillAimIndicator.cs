@@ -1,5 +1,6 @@
 using System.Collections;
 using UnityEngine;
+using UnityEngine.UI;
 #if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
 using UnityEngine.InputSystem;
 #endif
@@ -41,6 +42,14 @@ namespace BossRaid
         [Tooltip("확정 마커 표시 시간(초). 0.4~0.6 권장.")]
         [SerializeField] private float confirmDuration = 0.5f;
 
+        [Header("Screen Edge Overlay (조준 중 화면 외곽 발광)")]
+        [Tooltip("조준 종료 시 화면 외곽 아웃라인 페이드아웃 시간(초).")]
+        [SerializeField] private float edgeFadeOutTime = 0.15f;
+        [Tooltip("조준 진입 시 페이드인 시간(초, 즉각적으로).")]
+        [SerializeField] private float edgeFadeInTime = 0.05f;
+        [Tooltip("스킬 색이 안 넘어올 때(알파 0) 쓰는 폴백 외곽색(은백).")]
+        [SerializeField] private Color edgeFallbackColor = new Color(1.4f, 1.5f, 1.7f, 1f);
+
         private Transform _ring;       // 사거리 링 (딜러 중심)
         private Transform _reticle;    // AoE 레티클 (조준 지점)
         private Transform _dirLine;    // 방향선 (딜러 → 레티클 중심)
@@ -52,6 +61,14 @@ namespace BossRaid
         private Transform _confirm;        // 확정 마커 Quad (조준과 독립적으로 잔존·애니메이션)
         private Material _confirmMat;      // 확정 마커 인스턴스 머티리얼(알파 애니메이션용)
         private Coroutine _confirmRoutine; // 진행 중인 수축 애니메이션
+
+        // ── 화면 외곽 발광 오버레이 상태 (풀스크린 UI, 1회 생성 캐시) ──
+        private Canvas _edgeCanvas;        // 전용 오버레이 캔버스(sortingOrder 5, 레이캐스트 off)
+        private Image _edgeImage;          // 풀스크린 스트레치 Image (AimScreenEdge 머티리얼)
+        private Material _edgeMat;          // AimScreenEdge 인스턴스 머티리얼(스킬별 색 세팅)
+        private float _edgeAlpha;          // 현재 표시 알파(페이드 진행값)
+        private float _edgeTargetAlpha;    // 목표 알파(1=표시, 0=숨김)
+        private static readonly int EdgeColorId = Shader.PropertyToID("_Color");
 
         /// <summary>사거리로 클램프된 최종 조준 지점(월드). 발사 좌표로 사용.</summary>
         public Vector3 ClampedAimPoint { get; private set; }
@@ -83,8 +100,12 @@ namespace BossRaid
 
         // ─────────────── 공개 API ───────────────
 
-        /// <summary>조준 모드 진입: 사거리/AoE 반경(월드 단위) 설정 + 표시 시작.</summary>
+        /// <summary>조준 모드 진입(색 미지정 오버로드): 폴백 외곽색 사용.</summary>
         public void Show(float rangeWorld, float aoeRadiusWorld)
+            => Show(rangeWorld, aoeRadiusWorld, edgeFallbackColor);
+
+        /// <summary>조준 모드 진입: 사거리/AoE 반경(월드 단위) 설정 + 표시 시작 + 스킬별 화면 외곽 발광.</summary>
+        public void Show(float rangeWorld, float aoeRadiusWorld, Color edgeColor)
         {
             _rangeWorld = Mathf.Max(0.01f, rangeWorld);
             _aoeWorld = Mathf.Max(0.01f, aoeRadiusWorld);
@@ -96,6 +117,74 @@ namespace BossRaid
             _ring.gameObject.SetActive(true);
             _reticle.gameObject.SetActive(true);
             if (_dirLine != null) _dirLine.gameObject.SetActive(true);
+
+            ShowEdge(edgeColor);
+        }
+
+        // ─────────────── 화면 외곽 발광 오버레이 ───────────────
+
+        /// <summary>스킬 색으로 외곽 아웃라인 표시(페이드인). 알파 0(직렬화 누락) 이면 폴백 색.</summary>
+        private void ShowEdge(Color edgeColor)
+        {
+            EnsureEdgeOverlay();
+            if (_edgeImage == null) return;
+            if (edgeColor.a <= 0.001f) edgeColor = edgeFallbackColor;   // 방어: 씬 직렬화 누락 폴백
+            if (_edgeMat != null) _edgeMat.SetColor(EdgeColorId, edgeColor);
+            _edgeImage.enabled = true;
+            _edgeTargetAlpha = 1f;   // Update 가 edgeFadeInTime 으로 페이드인
+        }
+
+        /// <summary>풀스크린 UI 오버레이(캔버스 sortingOrder 5, 레이캐스트 off) 1회 생성 + 머티리얼 캐시.</summary>
+        private void EnsureEdgeOverlay()
+        {
+            if (_edgeCanvas != null) return;
+
+            var canvasGo = new GameObject("AimScreenEdgeCanvas", typeof(Canvas));
+            canvasGo.transform.SetParent(transform, false);
+            _edgeCanvas = canvasGo.GetComponent<Canvas>();
+            _edgeCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            _edgeCanvas.sortingOrder = 5;   // HUD(10) 아래, 게임 위. 시야 방해 최소.
+            // GraphicRaycaster 미부착 = 레이캐스트 off (클릭이 게임으로 통과).
+
+            var imgGo = new GameObject("EdgeImage", typeof(RectTransform));
+            imgGo.transform.SetParent(canvasGo.transform, false);
+            _edgeImage = imgGo.AddComponent<Image>();
+            _edgeImage.raycastTarget = false;
+            var rt = _edgeImage.rectTransform;
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;   // 풀스크린 스트레치
+            rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+
+            var sh = Shader.Find("BossRaid/AimScreenEdge");
+            if (sh != null)
+            {
+                _edgeMat = new Material(sh);
+                _edgeImage.material = _edgeMat;
+            }
+            _edgeImage.color = Color.white;   // 정점 색은 흰색, 페이드는 canvasRenderer 알파로
+            _edgeAlpha = 0f;
+            _edgeTargetAlpha = 0f;
+            _edgeImage.canvasRenderer.SetAlpha(0f);
+            _edgeImage.enabled = false;
+        }
+
+        /// <summary>외곽 아웃라인 페이드(표시=빠르게 인, 숨김=0.15s 아웃).</summary>
+        private void UpdateEdgeFade()
+        {
+            if (_edgeImage == null) return;
+            if (Mathf.Approximately(_edgeAlpha, _edgeTargetAlpha)) return;
+
+            float dur = _edgeTargetAlpha > _edgeAlpha
+                ? Mathf.Max(0.001f, edgeFadeInTime)
+                : Mathf.Max(0.001f, edgeFadeOutTime);
+            _edgeAlpha = Mathf.MoveTowards(_edgeAlpha, _edgeTargetAlpha, Time.unscaledDeltaTime / dur);
+            _edgeImage.canvasRenderer.SetAlpha(_edgeAlpha);
+            if (_edgeAlpha <= 0.001f && _edgeTargetAlpha <= 0f)
+                _edgeImage.enabled = false;   // 완전히 숨으면 렌더 비활성
+        }
+
+        private void Update()
+        {
+            UpdateEdgeFade();
         }
 
         /// <summary>
@@ -113,6 +202,8 @@ namespace BossRaid
             if (_ring != null) _ring.gameObject.SetActive(false);
             if (_reticle != null) _reticle.gameObject.SetActive(false);
             if (_dirLine != null) _dirLine.gameObject.SetActive(false);
+
+            _edgeTargetAlpha = 0f;   // 화면 외곽 발광 페이드아웃(edgeFadeOutTime)
         }
 
         /// <summary>

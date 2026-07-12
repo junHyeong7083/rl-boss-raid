@@ -453,10 +453,19 @@ namespace BossRaid
                 }
                 case "line":
                 {
-                    // 빔: Quad의 X=길이, Y=폭. 쉐이더는 UV에서 _LineWidth(±0.15)만큼 세로 띠를 그림.
-                    // 월드 빔 폭 = 실제 hw*2. Quad Y 스케일이 그만큼이어야 쉐이더 띠가 실제 두께가 됨.
-                    // 쉐이더는 UV 전체(0~1)를 쓰는데, _LineWidth=0.15라 UV ±0.15 = 전체 세로의 30%만 칠함.
-                    // 따라서 Quad Y = (원하는 월드 폭) / 0.3.
+                    // ── 돌진(line) 텔레그래프 기하 명세 ──
+                    // Python(_rebake_rush_telegraph)은 라인을 a=(보스 현재 위치) → b=(보스 + dir*length)
+                    // 선분 + 반폭 hw 로 매 턴 재베이크한다. 즉 a 끝은 항상 보스, b 끝은 타겟 방향 끝점.
+                    // 셰이더 sampleLine 은 로컬 +X 를 시전축(길이), 로컬 Y 를 폭으로 쓰며 쿼드 전체 X범위
+                    // (−0.5~0.5)를 균일 커버한다. 따라서 렌더 쿼드는:
+                    //   위치   = 선분 중점 (a+b)/2         → 보스에서 끝점까지 대칭으로 뻗음
+                    //   X스케일 = |b−a| (전체 길이)        → 반만 그리지 않음
+                    //   회전   = a→b 방향으로 로컬 +X 정렬
+                    // 좌표 매핑: sim(x,y)→월드(x,z). Quaternion.Euler(0,yaw,0)*baseTilt 는 로컬 +X 를
+                    // (cos yaw, 0, −sin yaw) 로 보낸다. dir 방향 φ=atan2(dir.z,dir.x) 로 향하려면
+                    // (cos φ, 0, sin φ) 가 필요 → yaw = −φ (fan 케이스의 −angle 과 동일 규약).
+                    // (이전 버그: yaw=+φ 로 dir 의 Z성분이 반전돼 빔이 보스에서 어긋난 방향으로 뻗었음.)
+                    // 폭: 셰이더가 UV ±_LineWidth(0.15)=세로 30%만 칠하므로 Quad Y = (hw*2) / 0.3.
                     var a = ContinuousToWorld(shape.ax, shape.ay);
                     var b = ContinuousToWorld(shape.bx, shape.by);
                     var mid = (a + b) * 0.5f + Vector3.up * 0.02f;
@@ -468,7 +477,7 @@ namespace BossRaid
                     tr.localScale = new Vector3(Mathf.Max(0.1f, len), quadY, 1f);
                     if (dir.sqrMagnitude > 1e-5f)
                     {
-                        float yawDeg = Mathf.Atan2(dir.z, dir.x) * Mathf.Rad2Deg;
+                        float yawDeg = -Mathf.Atan2(dir.z, dir.x) * Mathf.Rad2Deg;   // 로컬 +X 를 a→b 로 정렬(−φ)
                         tr.rotation = Quaternion.Euler(0f, yawDeg, 0f) * baseTilt;
                     }
                     else tr.rotation = baseTilt;
