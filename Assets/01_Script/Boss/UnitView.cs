@@ -57,6 +57,7 @@ namespace BossRaid
         private bool _isMovingAnim;           // 히스테리시스 적용된 달리기 애니 상태
         private GameObject _shieldAura;       // 실드 버프 지속 오라(절차 폴백)
         private GameObject _atkAura;          // 공버프 지속 오라(절차 폴백)
+        private bool _extRotWasOwned;         // 직전 프레임 회전 소유권(반환 시 목표 동기화용)
         private bool _aliveKnown;             // 생존 상태를 한 번이라도 받았는지
         private Vector3 _authPos;             // 예측 오염 없는 권위 보간 위치(transform.position 과 분리)
 
@@ -293,9 +294,18 @@ namespace BossRaid
 
             // 회전: 딜러 예측기가 소유권을 가져간 동안(ExternalRotationOwner)은 스킵 —
             // 예측기의 intent 회전과 이중 슬럽 경합(떨림/역회전)을 없앤다. NPC/비소유 시 기존 로직.
+            // 소유권이 돌아오는 프레임엔 현재 회전을 목표로 동기화 — 시전 방향 고정이 끝난 뒤
+            // 옛 목표(마지막 이동 방향)로 홱 되돌아가는 것을 방지.
+            if (ExternalRotationOwner) _extRotWasOwned = true;
+            else
+            {
+                if (_extRotWasOwned) { _targetRot = transform.rotation; _extRotWasOwned = false; }
+            }
             if (!ExternalRotationOwner)
             {
-                // 이동 중이면 이동 방향, 정지면 보스를 바라봄 (전투 중 자연스러움)
+                // 이동 중이면 이동 방향. 정지 시: NPC 는 보스를 바라봄(자연스러움),
+                // 플레이어(딜러)는 마지막 방향 유지 — 도착할 때마다 강제로 보스를 봐서
+                // 조작 의도(마지막 이동/시전 방향)와 싸우던 불편 제거.
                 Vector3 faceTarget;
                 bool haveFace = false;
                 if (moveDir.sqrMagnitude > 0.0004f)
@@ -303,7 +313,7 @@ namespace BossRaid
                     faceTarget = transform.position + moveDir.normalized;
                     haveFace = true;
                 }
-                else if (viewer != null && viewer.TryGetBossPosition(out var bossPos))
+                else if (Role != 0 && viewer != null && viewer.TryGetBossPosition(out var bossPos))
                 {
                     faceTarget = bossPos;
                     haveFace = true;
