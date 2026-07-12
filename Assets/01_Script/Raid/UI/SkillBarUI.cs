@@ -34,13 +34,14 @@ namespace BossRaid
         [Tooltip("직접 지정할 Canvas(비우면 Screen Space Overlay 자체 생성).")]
         [SerializeField] private Canvas canvas;
 
-        [Header("Slots (설치기 개편 딜러 킷 4종, 확장 가능)")]
+        [Header("Slots (설치기 개편 딜러 킷 5종, 확장 가능)")]
         [SerializeField]
         private SkillSlotDef[] slotDefs = new SkillSlotDef[]
         {
-            new SkillSlotDef { label = "혈창",   keyLabel = "Q",     cooldownKey = "skill",   maxCooldown = 3 },
-            new SkillSlotDef { label = "혈월",   keyLabel = "W",     cooldownKey = "skill2",  maxCooldown = 7 },
-            new SkillSlotDef { label = "카운터", keyLabel = "E",     cooldownKey = "counter", maxCooldown = 8 },
+            new SkillSlotDef { label = "혈창",   keyLabel = "Q",     cooldownKey = "skill",   maxCooldown = 20 },
+            new SkillSlotDef { label = "혈월",   keyLabel = "W",     cooldownKey = "skill2",  maxCooldown = 40 },
+            new SkillSlotDef { label = "카운터", keyLabel = "E",     cooldownKey = "counter", maxCooldown = 25 },
+            new SkillSlotDef { label = "대시",   keyLabel = "Shift", cooldownKey = "dash",    maxCooldown = 17 },
             new SkillSlotDef { label = "평타",   keyLabel = "Space", cooldownKey = "",        maxCooldown = 0 },
         };
 
@@ -56,6 +57,9 @@ namespace BossRaid
         [Tooltip("조준 모드 하이라이트 펄스 색(밝은 금색).")]
         [SerializeField] private Color aimPulseColor = new Color32(0xFF, 0xE2, 0x8A, 0xff);
         [SerializeField] private float aimPulseSpeed = 6f;
+        [Tooltip("쿨다운 숫자를 남은 '초'로 표시할 때 턴→초 환산 계수(서버 turn-interval=0.3s). "
+               + "20/40턴급 긴 쿨은 턴수보다 초(소수1)가 직관적.")]
+        [SerializeField] private float secondsPerTurn = 0.3f;
 
         // ─────────────── 런타임 슬롯 상태 ───────────────
         private class Slot
@@ -197,8 +201,20 @@ namespace BossRaid
             {
                 bool show = remaining > 0;
                 slot.cdText.enabled = show;
-                slot.cdText.text = show ? remaining.ToString() : "";
+                slot.cdText.text = show ? FormatCooldown(remaining) : "";
             }
+        }
+
+        /// <summary>
+        /// 쿨다운 숫자 포맷: 남은 턴 → 초(턴×secondsPerTurn) 환산. 20/40턴급 긴 쿨은 초가 직관적.
+        /// 10초 이상은 정수, 미만은 소수1(예: 12 / 5.1 / 0.3)로 슬롯 폭에 맞춰 표시.
+        /// </summary>
+        private string FormatCooldown(int remainingTurns)
+        {
+            if (secondsPerTurn <= 0f) return remainingTurns.ToString();
+            float sec = remainingTurns * secondsPerTurn;
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            return sec >= 10f ? Mathf.RoundToInt(sec).ToString(ci) : sec.ToString("0.0", ci);
         }
 
         /// <summary>쿨다운 차단 피드백: 해당 쿨다운 키 슬롯을 흔든다.</summary>

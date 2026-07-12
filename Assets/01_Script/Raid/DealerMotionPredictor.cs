@@ -42,6 +42,11 @@ namespace BossRaid
         [Tooltip("몸 방향 보정 Slerp 속도.")]
         public float facingLerpSpeed = 12f;
 
+        [Header("Dash 특례")]
+        [Tooltip("대시 임펄스 후 오프셋 상한 특례 지속(초). 이 창 동안 오프셋 상한이 대시 거리까지 확대되고, "
+               + "큰 오차 스냅/감쇠가 억제되어 화면이 먼저 훅 나간 뒤 서버가 스냅샷으로 자연히 따라온다.")]
+        public float dashOffsetWindow = 0.5f;
+
         // ─────────────── 내부 상태 ───────────────
         private Vector3 _offset;        // 권위 렌더 위치 대비 예측 오프셋
         private bool _hasIntent;        // 이동 의도 활성 여부
@@ -50,6 +55,8 @@ namespace BossRaid
         private Vector3 _displayPos;    // 마지막으로 표시한 위치(스냅샷 보정 기준)
         private bool _hasDisplay;
         private UnitView _unitView;     // 같은 GameObject 의 UnitView(권위 렌더 위치 조회 계약)
+        private float _dashMaxOffset;   // 대시 특례 오프셋 상한(월드) — 창 동안만 유효
+        private float _dashWindowRemain;// 대시 특례 남은 시간(초, >0 이면 특례 적용 중)
 
         private void Awake()
         {
@@ -74,22 +81,51 @@ namespace BossRaid
         public void ClearMoveIntent() => _hasIntent = false;
 
         /// <summary>
+        /// 대시 즉발 임펄스: 오프셋에 방향×거리를 즉시 가산해 화면이 먼저 훅 나가게 한다.
+        /// 대시 창(dashOffsetWindow) 동안 오프셋 상한을 distanceWorld 까지 특례로 확대하고,
+        /// 그 창 동안엔 큰 오차 스냅/의도 없음 감쇠를 억제해 서버 스냅샷이 따라오며 자연히 소화된다.
+        /// RaidPlayerController 가 대시 전송 직후 호출.
+        /// </summary>
+        public void DashImpulse(Vector3 worldDir, float distanceWorld)
+        {
+            worldDir.y = 0f;
+            if (!_alive || !InputOn()) return;
+            if (worldDir.sqrMagnitude < 1e-6f || distanceWorld <= 0f) return;
+
+            _dashMaxOffset = Mathf.Max(maxOffset, distanceWorld);   // 특례 상한(대시 거리까지 허용)
+            _dashWindowRemain = dashOffsetWindow;
+
+            _offset += worldDir.normalized * distanceWorld;          // 즉시 가산 → 선행 이동
+            _offset = Vector3.ClampMagnitude(_offset, _dashMaxOffset);
+            _hasDisplay = true;
+        }
+
+        /// <summary>현재 유효 오프셋 상한: 대시 창 중이면 특례 상한, 아니면 기본 maxOffset.</summary>
+        private float EffectiveMaxOffset()
+            => _dashWindowRemain > 0f ? Mathf.Max(maxOffset, _dashMaxOffset) : maxOffset;
+
+        /// <summary>
         /// 스냅샷 도착(서버 권위 갱신) 통지. serverWorldPos = 이번 턴 서버 위치의 월드 변환값.
         /// 오프셋을 표시위치 − 권위 렌더 위치(보간 중 위치)로 재계산한다. 큰 오차는 스냅 보정.
         /// </summary>
         public void OnServerSnapshot(Vector3 serverWorldPos, bool alive)
         {
             _alive = alive;
-            if (!alive || !InputOn()) { _offset = Vector3.zero; _hasIntent = false; return; }
+            if (!alive || !InputOn()) { _offset = Vector3.zero; _hasIntent = false; _dashWindowRemain = 0f; return; }
             if (!_hasDisplay) return;
 
-            // 큰 오차 판정은 새 서버 목표 기준(서버 이동 거부: 충돌/경직 대응).
-            Vector3 snapErr = _displayPos - serverWorldPos;
-            snapErr.y = 0f;
-            if (snapErr.magnitude >= snapErrorThreshold)
+            // 대시 특례 창에는 큰 오차 스냅을 억제한다. 대시는 의도적으로 큰 오프셋(≈distanceWorld)을
+            // 만들며, 서버는 다음 스냅샷에 그 방향으로 이동해 오차를 소화한다. 창 밖에서만 스냅 보정.
+            if (_dashWindowRemain <= 0f)
             {
-                _offset = Vector3.zero;                                   // 서버 거부/큰 오차 → 스냅 보정
-                return;
+                // 큰 오차 판정은 새 서버 목표 기준(서버 이동 거부: 충돌/경직 대응).
+                Vector3 snapErr = _displayPos - serverWorldPos;
+                snapErr.y = 0f;
+                if (snapErr.magnitude >= snapErrorThreshold)
+                {
+                    _offset = Vector3.zero;                               // 서버 거부/큰 오차 → 스냅 보정
+                    return;
+                }
             }
 
             // 오프셋은 '권위 렌더 위치'(보간 중이라 목표보다 뒤에 있음) 기준으로 재계산.
@@ -98,7 +134,7 @@ namespace BossRaid
             Vector3 auth = _unitView != null ? _unitView.AuthoritativePosition : serverWorldPos;
             Vector3 newOffset = _displayPos - auth;
             newOffset.y = 0f;
-            _offset = Vector3.ClampMagnitude(newOffset, maxOffset);       // 상한 클램프
+            _offset = Vector3.ClampMagnitude(newOffset, EffectiveMaxOffset());   // 상한 클램프(대시 창 특례)
         }
 
         // ─────────────── 매 프레임 (UnitView.Update 이후, 카메라 이전) ───────────────
@@ -108,15 +144,24 @@ namespace BossRaid
             // UnitView 가 이번 프레임 확정한 예측 오염 없는 권위 렌더 위치(명시 계약).
             Vector3 auth = _unitView != null ? _unitView.AuthoritativePosition : transform.position;
 
+            if (_dashWindowRemain > 0f) _dashWindowRemain -= Time.deltaTime;
+            float maxOff = EffectiveMaxOffset();
+
             bool active = _alive && InputOn();
             if (!active)
             {
-                _offset = Vector3.zero;   // 전투 외/사망: 예측 비활성 + 즉시 0
+                _offset = Vector3.zero;    // 전투 외/사망: 예측 비활성 + 즉시 0
+                _dashWindowRemain = 0f;
             }
             else if (_hasIntent)
             {
                 _offset += _intentDir * (moveSpeed * Time.deltaTime);
-                _offset = Vector3.ClampMagnitude(_offset, maxOffset);
+                _offset = Vector3.ClampMagnitude(_offset, maxOff);
+            }
+            else if (_dashWindowRemain > 0f)
+            {
+                // 대시 특례 창: 감쇠를 억제해 선행 오프셋을 유지(서버가 스냅샷으로 따라와 소화).
+                _offset = Vector3.ClampMagnitude(_offset, maxOff);
             }
             else if (_offset.sqrMagnitude > 1e-8f)
             {

@@ -2353,7 +2353,7 @@ MonoBehaviour:
     aimed: 1
     range: 7
     aoeRadius: 1.8
-    maxCooldown: 3
+    maxCooldown: 20
   - label: "\uD608\uC6D4 \uB099\uD558"
     key: 119
     actionId: 18
@@ -2361,7 +2361,7 @@ MonoBehaviour:
     aimed: 1
     range: 9
     aoeRadius: 3
-    maxCooldown: 7
+    maxCooldown: 40
   - label: "\uCE74\uC6B4\uD130"
     key: 101
     actionId: 17
@@ -2369,7 +2369,7 @@ MonoBehaviour:
     aimed: 0
     range: 0
     aoeRadius: 0
-    maxCooldown: 8
+    maxCooldown: 25
   - label: "\uAE30\uBCF8\uACF5\uACA9"
     key: 32
     actionId: 9

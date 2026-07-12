@@ -41,19 +41,20 @@ class PhaseID(IntEnum):
 
 
 class RaidActionID(IntEnum):
-    """NPC/플레이어 행동 공간 (19개).
+    """NPC/플레이어 행동 공간 (20개).
 
-    8방향 이동 + 대기(9) + 기본공격 + 역할 스킬 + 딜러 조준 설치기 2종/카운터.
+    8방향 이동 + 대기(9) + 기본공격 + 역할 스킬 + 딜러 조준 설치기 2종/카운터/대시.
     역할별 허용:
       공통  : STAY, 8방향 MOVE, ATTACK_BASIC
       TANK  : ATTACK_SKILL, TAUNT, GUARD
       HEALER: ATTACK_SKILL, HEAL, CLEANSE
       SUPPORT: ATTACK_SKILL, BUFF_ATK, BUFF_SHIELD
       DEALER: ATTACK_SKILL(Q 혈창 투척, 지면 조준 AoE),
-              SKILL_2(W 혈월 낙하, 지면 조준 AoE, 딜러 전용), COUNTER(E 저지)
+              SKILL_2(W 혈월 낙하, 지면 조준 AoE, 딜러 전용), COUNTER(E 저지),
+              DASH(회피 기동기 — 조준 방향으로 즉시 이동)
 
     딜러 조준: env.step(actions, aim_points={"p0": (tx, ty)}) 로 sim 좌표 전달.
-    aim 없으면 보스 위치 자동 조준. 사거리 밖 조준점은 경계로 클램프.
+    aim 없으면 보스 위치 자동 조준(설치기) / 보스 반대·이동 방향(대시). 사거리 밖 조준점은 경계로 클램프.
     """
     STAY = 0
     MOVE_UP = 1
@@ -74,6 +75,7 @@ class RaidActionID(IntEnum):
     BUFF_SHIELD = 16
     COUNTER = 17            # 딜러 E 저지 액션
     SKILL_2 = 18            # 딜러 W 혈월 낙하 (대형 조준 AoE, 딜러 전용)
+    DASH = 19              # 딜러 회피 기동기 — 조준 방향으로 dash_distance 즉시 이동
 
 
 # 별칭 (boss_streamer 계열 재사용 호환 — BossActionID 이름도 노출)
@@ -93,7 +95,9 @@ class RoleStats:
 
 # 파티 유닛 스탯 (유클리드). 근접 브루저 보스 상대 → 탱커 고HP, 힐러 원거리.
 ROLE_STATS: Dict[PartyRole, RoleStats] = {
-    PartyRole.DEALER:  RoleStats(hp=340, mp=80,  attack=42, defense=5,  attack_range=1.4, move_speed=1.0, radius=0.3),
+    # attack 42→50: 스킬 쿨다운 상향(Q3→20/W7→40)으로 줄어든 딜러 DPS 보정. 평타가
+    # 필러로 도는 재설계 하에서 FSM 승리 킬타임 중앙값을 목표(700턴 이하, ~602턴)로 복원.
+    PartyRole.DEALER:  RoleStats(hp=340, mp=80,  attack=50, defense=5,  attack_range=1.4, move_speed=1.0, radius=0.3),
     PartyRole.TANK:    RoleStats(hp=700, mp=60,  attack=18, defense=22, attack_range=1.4, move_speed=0.9, radius=0.5),
     PartyRole.HEALER:  RoleStats(hp=280, mp=150, attack=12, defense=5,  attack_range=3.5, move_speed=1.0, radius=0.3),
     PartyRole.SUPPORT: RoleStats(hp=360, mp=120, attack=24, defense=10, attack_range=2.5, move_speed=1.0, radius=0.4),
@@ -166,22 +170,30 @@ class RaidConfig:
     #   Self(16) + Allies(24) + Boss(12) + PatternCh(10x4=40) + Danger(8)
     #   + Escape(4) + Coop(8) + Pillars(12) + Player(4) = 128
     obs_size: int = 128
-    num_actions: int = 19
+    num_actions: int = 20
+
+    # ── 대시(회피 기동기, 딜러) ──
+    # 조준 방향(aim_points)으로 dash_distance 즉시 이동. aim 없으면 이동 방향/보스 반대 방향 폴백.
+    # 이동 판정은 슬라이딩/탈출 규칙 재사용 — 경로를 0.5 서브스텝으로 나눠 장애물 앞까지만.
+    dash_distance: float = 2.5
 
     # ── 스킬 쿨타임 (Unity 스킬바 UI 연동) ──
     # 액션 ID → 쿨다운 턴수. 기본공격/이동/대기는 0(쿨다운 없음).
     # 쿨다운 중 해당 액션 선택 시 STAY 처리. 값은 밸런스 재량(조정 가능).
+    # 쿨다운 재설계 (TURN_SEC=0.3s): 스킬을 "가끔 쓰는 한 방"으로, 평타를 필러로.
+    # 쿨 없는 평타가 스킬 사이를 메우면서 "평타 쓸 이유"를 복원한다.
     skill_cooldown: int = 5   # (레거시 참조용 기본값)
     skill_cooldowns: Dict[int, int] = field(default_factory=lambda: {
-        int(RaidActionID.ATTACK_SKILL): 3,   # 딜러 Q 혈창 투척 (타 역할 강공격도 3)
-        int(RaidActionID.SKILL_2): 7,        # 딜러 W 혈월 낙하
-        int(RaidActionID.COUNTER): 8,
-        int(RaidActionID.TAUNT): 6,
-        int(RaidActionID.GUARD): 4,
-        int(RaidActionID.HEAL): 4,
-        int(RaidActionID.CLEANSE): 8,
-        int(RaidActionID.BUFF_ATK): 8,
-        int(RaidActionID.BUFF_SHIELD): 6,
+        int(RaidActionID.ATTACK_SKILL): 20,  # 딜러 Q 혈창 투척 (20턴=6.0s) — 타 역할 강공격도 공유
+        int(RaidActionID.SKILL_2): 40,       # 딜러 W 혈월 낙하 (40턴=12.0s)
+        int(RaidActionID.COUNTER): 25,       # 딜러 E 저지 (25턴=7.5s)
+        int(RaidActionID.DASH): 17,          # 딜러 대시 회피 (17턴=5.1s)
+        int(RaidActionID.TAUNT): 6,          # (6턴=1.8s)
+        int(RaidActionID.GUARD): 4,          # (4턴=1.2s)
+        int(RaidActionID.HEAL): 4,           # (4턴=1.2s)
+        int(RaidActionID.CLEANSE): 8,        # (8턴=2.4s)
+        int(RaidActionID.BUFF_ATK): 8,       # (8턴=2.4s)
+        int(RaidActionID.BUFF_SHIELD): 6,    # (6턴=1.8s)
     })
 
     # ── 딜러 조준 설치기 (로아식 지면 지정 AoE, 즉시 발동 — 텔레그래프 없음) ──
@@ -237,6 +249,15 @@ class RaidConfig:
     pat_earth_donut_in: float = 3.0
     pat_earth_donut_out: float = 8.0
     pat_rush_width: float = 2.5               # 돌진 직선 반폭 (full width 2.5 → hw 1.25)
+    # ── FRENZY_RUSH(폭주 돌진) "표식 추격 돌진" ──
+    # windup 동안 보스→타겟 조준선을 매 턴 재베이크(origin=보스 현재 위치). fire 시
+    # 보스가 그 시점 타겟 방향으로 charge_turns 에 걸쳐 실제 이동(턴당 charge_speed).
+    # charge_speed 는 스냅샷 보간 순간이동 임계(3.0) 미만으로 유지.
+    pat_rush_windup_turns: int = 8            # 조준선 예고 (8턴=2.4s)
+    pat_rush_charge_turns: int = 3            # 실제 돌진 지속 턴수
+    pat_rush_charge_speed: float = 2.8        # 돌진 턴당 최대 이동 (snap 임계 3.0 미만)
+    pat_rush_length_bonus: float = 2.0        # 조준선 길이 = 보스→타겟 거리 + bonus
+    pat_rush_length_max: float = 12.0         # 조준선 최대 길이
     pat_throw_radius: float = 2.5
     pat_throw_count: int = 3
     pat_spin_radius: float = 6.0
@@ -248,9 +269,10 @@ class RaidConfig:
     # ── 카운터 돌진 기믹 ──
     # 실시간(TURN=0.3s) 기준: 3턴=0.9초는 저지 반응에 너무 짧음 → 6턴=1.8초.
     counter_window_turns: int = 6
-    counter_front_angle_deg: float = 100.0    # 보스 전방 판정 각
-    counter_range: float = 2.2                # 보스 표면 + 근접 판정 거리
+    counter_front_angle_deg: float = 70.0     # 보스 전방 판정 각 (타이트화 100→70)
+    counter_range: float = 2.0                # 보스 표면 + 근접 판정 거리 (2.2→2.0)
     counter_fail_damage_scale: float = 1.5    # 실패 시 강화 돌진 배율
+    counter_miss_cooldown_scale: float = 0.5  # 각도/거리 조건 밖 시도 시 쿨다운 절반만 적용(재시도 여지)
 
     # ── 무력화 (스태거) ──
     # 실시간(TURN=0.3s) 기준: 6턴=1.8초는 파티 협공에 촉박 → 10턴=3.0초.
@@ -325,6 +347,7 @@ SKILL_KEYS: Dict[int, str] = {
     int(RaidActionID.ATTACK_SKILL): "skill",     # 딜러 Q
     int(RaidActionID.SKILL_2): "skill2",         # 딜러 W
     int(RaidActionID.COUNTER): "counter",        # 딜러 E
+    int(RaidActionID.DASH): "dash",              # 딜러 대시 (회피 기동기)
     int(RaidActionID.TAUNT): "taunt",
     int(RaidActionID.GUARD): "guard",
     int(RaidActionID.HEAL): "heal",
@@ -346,7 +369,7 @@ ROLE_SKILLS: Dict[PartyRole, Tuple[int, int]] = {
 # 딜러는 {"skill": Q, "skill2": W, "counter": E} 3키.
 SKILL_BAR: Dict[PartyRole, Tuple[int, ...]] = {
     PartyRole.DEALER:  (int(RaidActionID.ATTACK_SKILL), int(RaidActionID.SKILL_2),
-                        int(RaidActionID.COUNTER)),
+                        int(RaidActionID.COUNTER), int(RaidActionID.DASH)),
     PartyRole.TANK:    (int(RaidActionID.TAUNT), int(RaidActionID.GUARD)),
     PartyRole.HEALER:  (int(RaidActionID.HEAL), int(RaidActionID.CLEANSE)),
     PartyRole.SUPPORT: (int(RaidActionID.BUFF_ATK), int(RaidActionID.BUFF_SHIELD)),

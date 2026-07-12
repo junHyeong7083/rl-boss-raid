@@ -114,26 +114,41 @@ def test_all_patterns_forced():
 # ─────────────────── 3. 폭주 돌진 - 기둥 그로기 ───────────────────
 
 def test_rush_pillar_grog():
-    print("\n== 3) 폭주 돌진 - 기둥 충돌 그로기 ==")
+    print("\n== 3) 폭주 돌진(표식 추격) - 기둥 충돌 그로기 ==")
     cfg = RaidConfig()
     env = RaidEnv(cfg, seed=11)
     env.reset(seed=11)
-    # 보스를 기둥 (5,5) 바로 위(북쪽)에 배치, 어그로 타깃을 아래(남쪽)로 → 돌진 방향이 기둥 관통
+    # 플레이어 편향 제거 → 표식은 어그로 top(탱커)로 고정.
+    env.config.pat_target_player_bias = 0.0
+    # 보스를 기둥 (5,5) 바로 위(북쪽)에 배치, 표식 타깃(탱커)을 아래(남쪽)로 → 추격 돌진이 기둥 관통
     env.boss.x, env.boss.y = 5.0, 10.0
-    env.boss.facing = -math.pi / 2
     tank_uid = next(u.uid for u in env.units.values() if u.role == PartyRole.TANK)
     for u in env.units.values():
         env.boss.aggro[u.uid] = 0.0
     env.boss.aggro[tank_uid] = 1000.0
     env.units[tank_uid].x, env.units[tank_uid].y = 5.0, 2.0
     env.force_pattern(PatternID.FRENZY_RUSH)
+    # 표식이 탱커에게 걸렸는지 (스냅샷 rush_target)
+    check(env.get_snapshot()["boss"].get("rush_target") == tank_uid,
+          f"표식 rush_target=탱커 ({env.get_snapshot()['boss'].get('rush_target')})")
+    boss_start = (env.boss.x, env.boss.y)
     hit = False
-    for _ in range(8):
+    moved_during_charge = False
+    n = cfg.pat_rush_windup_turns + cfg.pat_rush_charge_turns + 3
+    for _ in range(n):
+        prev = (env.boss.x, env.boss.y)
         actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
         env.step(actions)
+        if math.hypot(env.boss.x - prev[0], env.boss.y - prev[1]) > 1e-3:
+            moved_during_charge = True
+        # 순간이동 아님: 매 턴 이동이 snap 임계(3.0) 미만
+        check_move = math.hypot(env.boss.x - prev[0], env.boss.y - prev[1])
+        if check_move >= 3.0:
+            _failures.append("돌진 턴 이동이 snap 임계(3.0) 이상")
         if any(e.get("type") == "rush_pillar_hit" for e in _collect_events(env)):
             hit = True
             break
+    check(moved_during_charge, "보스가 실제로 이동(추격 돌진)")
     check(hit, "돌진이 기둥에 충돌해 rush_pillar_hit 발생")
     check(env.boss.grog_turns > 0, "충돌 후 보스 그로기(딜타임)")
     check(any(not p.alive for p in env.pillars), "충돌한 기둥 파괴됨")
@@ -214,6 +229,117 @@ def test_counter_fail_rush():
             break
     check(fail_seen, "counter_fail 발생")
     check(enhanced, "실패 시 강화 돌진(enhanced) 발동")
+
+
+# ─────────────────── 5c. 대시(회피 기동기) ───────────────────
+
+def test_dash():
+    print("\n== 5c) 대시(회피 기동기) ==")
+    # (a) 조준 방향으로 dash_distance 이동 + 쿨다운
+    env = _fresh_env_for_aim(51)
+    duid = env.config.player_slot
+    dealer = env.units[duid]
+    dealer.x, dealer.y = 10.0, 4.0        # 장애물(기둥/보스) 없는 위치
+    x0, y0 = dealer.x, dealer.y
+    actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
+    actions[f"p{duid}"] = int(RaidActionID.DASH)
+    env.step(actions, aim_points={f"p{duid}": (18.0, 4.0)})   # +x 방향
+    ev = next((e for e in env.step_events.get(duid, []) if e.get("type") == "dash"), None)
+    check(ev is not None, "dash 이벤트 방출")
+    moved = math.hypot(dealer.x - x0, dealer.y - y0)
+    check(abs(moved - env.config.dash_distance) < 0.6,
+          f"대시 이동 거리 ~= dash_distance ({moved:.2f} vs {env.config.dash_distance})")
+    check(dealer.x > x0 + 1.0, "조준(+x) 방향으로 이동")
+    check(dealer.cooldowns.get(int(RaidActionID.DASH), 0) > 0, "대시 쿨다운 적용")
+    check(ev is not None and abs(ev.get("tx") - dealer.x) < 1e-6, "dash 이벤트 tx=도착 좌표")
+
+    # (b) 장애물(보스) 관통 금지 — 보스 쪽으로 대시하면 앞에서 정지
+    env = _fresh_env_for_aim(52)
+    duid = env.config.player_slot
+    dealer = env.units[duid]
+    env.boss.x, env.boss.y = 10.0, 10.0
+    dealer.x, dealer.y = 7.0, 10.0        # 보스 서쪽 3m
+    x0 = dealer.x
+    actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
+    actions[f"p{duid}"] = int(RaidActionID.DASH)
+    env.step(actions, aim_points={f"p{duid}": (12.0, 10.0)})  # 보스 관통 방향
+    moved = dealer.x - x0
+    check(0.0 <= moved < env.config.dash_distance, f"보스 앞에서 정지 (이동 {moved:.2f} < 2.5)")
+    check(env._boss_dist(dealer.x, dealer.y) >= 0.0, "보스와 겹치지 않음")
+
+    # (c) aim 미지정 -> 보스 반대 방향 폴백
+    env = _fresh_env_for_aim(53)
+    duid = env.config.player_slot
+    dealer = env.units[duid]
+    env.boss.x, env.boss.y = 10.0, 10.0
+    dealer.x, dealer.y = 8.0, 10.0        # 보스 서쪽 → 폴백은 서쪽(-x)
+    x0 = dealer.x
+    actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
+    actions[f"p{duid}"] = int(RaidActionID.DASH)
+    env.step(actions, aim_points=None)
+    check(dealer.x < x0 - 0.5, "aim 미지정 시 보스 반대 방향으로 대시")
+
+
+# ─────────────────── 5d. 카운터 miss (각도/거리) ───────────────────
+
+def test_counter_miss():
+    print("\n== 5d) 카운터 miss (각도/거리 조건 밖) ==")
+    full_cd = RaidConfig().skill_cooldowns[int(RaidActionID.COUNTER)]
+
+    # (a) 거리 밖 miss
+    env = _fresh_env_for_aim(61)
+    duid = env.config.player_slot
+    dealer = env.units[duid]
+    dealer.x, dealer.y = 3.0, 10.0        # 보스(10,10)와 7m (counter_range 2.0 밖)
+    env.force_pattern(PatternID.COUNTER_RUSH)
+    actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
+    actions[f"p{duid}"] = int(RaidActionID.COUNTER)
+    env.step(actions)
+    ev = next((e for e in env.step_events.get(duid, []) if e.get("type") == "counter_miss"), None)
+    check(ev is not None, "거리 밖 counter_miss 이벤트")
+    check(ev is not None and ev.get("reason") == "range", f"reason=range ({ev.get('reason') if ev else '?'})")
+    cd_left = dealer.cooldowns.get(int(RaidActionID.COUNTER), 0)
+    check(0 < cd_left <= full_cd // 2, f"miss 시 절반 쿨다운 (남은 {cd_left} <= {full_cd//2})")
+
+    # (b) 각도 밖 miss (사거리 내지만 후방)
+    env = _fresh_env_for_aim(62)
+    duid = env.config.player_slot
+    dealer = env.units[duid]
+    env.boss.x, env.boss.y = 10.0, 10.0
+    dealer.x, dealer.y = 12.0, 10.0       # 보스 동쪽 근접(사거리 내)
+    env.force_pattern(PatternID.COUNTER_RUSH)
+    env.boss.facing = math.pi             # 보스가 딜러 반대편(서쪽)을 향함 → 딜러는 후방
+    actions = {f"p{i}": int(RaidActionID.STAY) for i in range(4)}
+    actions[f"p{duid}"] = int(RaidActionID.COUNTER)
+    env.step(actions)
+    ev = next((e for e in env.step_events.get(duid, []) if e.get("type") == "counter_miss"), None)
+    check(ev is not None and ev.get("reason") == "angle",
+          f"각도 밖 reason=angle ({ev.get('reason') if ev else '?'})")
+
+
+# ─────────────────── 3b. 돌진 표식 스냅샷 ───────────────────
+
+def test_rush_snapshot_fields():
+    print("\n== 3b) 돌진 표식 스냅샷 (rush_target/rush_left) ==")
+    env = RaidEnv(RaidConfig(), seed=71)
+    env.reset(seed=71)
+    snap0 = env.get_snapshot()
+    check(snap0["boss"].get("rush_target") == -1, "비활성 시 rush_target=-1")
+    check(snap0["boss"].get("rush_left") == 0, "비활성 시 rush_left=0")
+
+    env.config.pat_target_player_bias = 0.0
+    tank_uid = next(u.uid for u in env.units.values() if u.role == PartyRole.TANK)
+    for u in env.units.values():
+        env.boss.aggro[u.uid] = 0.0
+    env.boss.aggro[tank_uid] = 1000.0
+    env.force_pattern(PatternID.FRENZY_RUSH)
+    env.step({f"p{i}": int(RaidActionID.STAY) for i in range(4)})
+    snap = env.get_snapshot()
+    check(snap["boss"].get("rush_target") == tank_uid,
+          f"windup 중 rush_target=표식 uid ({snap['boss'].get('rush_target')})")
+    check(snap["boss"].get("rush_left", 0) > 0, "windup 중 rush_left>0")
+    has_line = any(s.get("kind") == "line" for tg in snap["telegraphs"] for s in tg["shapes"])
+    check(has_line, "돌진 조준선(line) 텔레그래프 존재")
 
 
 # ─────────────────── 6. 전멸기 LOS 성공/실패 ───────────────────
@@ -374,9 +500,9 @@ def test_aim_skills():
                   for e in env.step_events.get(tank_uid, []))
     check(invalid, "W 타 역할 사용 시 invalid_action")
 
-    # (g) 스냅샷 딜러 cooldowns 키 = skill/skill2/counter
+    # (g) 스냅샷 딜러 cooldowns 키 = skill/skill2/counter/dash
     keys = set(env.get_snapshot()["units"][env.config.player_slot]["cooldowns"].keys())
-    check(keys == {"skill", "skill2", "counter"}, f"딜러 cooldowns 키 {sorted(keys)}")
+    check(keys == {"skill", "skill2", "counter", "dash"}, f"딜러 cooldowns 키 {sorted(keys)}")
 
 
 def test_protocol_aim_parse():
@@ -514,9 +640,12 @@ def main():
     check(all_fired, "패턴 10종 전부 발동 확인")
 
     test_rush_pillar_grog()
+    test_rush_snapshot_fields()
     test_guard_deal_time()
     test_counter()
     test_counter_fail_rush()
+    test_dash()
+    test_counter_miss()
     test_seal_success()
     test_seal_fail()
     test_aim_skills()

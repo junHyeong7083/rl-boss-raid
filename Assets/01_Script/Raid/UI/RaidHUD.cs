@@ -229,6 +229,9 @@ namespace BossRaid
             // 안전 유도 마커(월드 공간, self-contained): viewer 만 넘겨주면 스스로 구독한다.
             _safeGuide = CreateChild<SafeGuideMarker>("SafeGuide");
             _safeGuide.viewer = viewer;
+
+            // 돌진 표식 마커(월드 공간, self-contained): viewer 자동 탐색 + 스스로 구독.
+            CreateChild<RushMarkView>("RushMark");
         }
 
         private void OnEnable()

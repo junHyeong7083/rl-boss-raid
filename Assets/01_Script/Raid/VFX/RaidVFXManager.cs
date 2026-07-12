@@ -38,6 +38,8 @@ namespace BossRaid
         private static readonly Color CGreen     = new Color(0.35f, 1.00f, 0.45f);   // 힐 초록
         private static readonly Color CBuffAtk   = new Color(1.00f, 0.42f, 0.42f);   // 공버프 붉은기
         private static readonly Color CBuffShield = new Color(0.42f, 0.72f, 1.00f);  // 실드버프 파란기
+        private static readonly Color CDashStreak = new Color(0.60f, 0.88f, 1.00f);  // 대시 잔상(청백)
+        private static readonly Color CDashDust   = new Color(0.80f, 0.85f, 0.92f);  // 대시 출발점 먼지(옅은 회백)
 
         // ─── 텔레그래프 스텝 발동 감지 상태 ───
         // key = "pattern:step_index". turns_remaining<=1 일 때 무장(arm)하고,
@@ -149,11 +151,22 @@ namespace BossRaid
                     }
                     case "counter_success":
                     {
-                        // 보스 위치 파란 대형 버스트 + 강 셰이크.
-                        ProceduralVFX.Burst(bossPos, CBlue, 48, 9f, 0.5f, 0.55f);
-                        ProceduralVFX.RingWave(bossPos, CBlue, 4f, 0.45f);
-                        HitStopManager.HitStop(0.15f);
-                        LostArkCamera.ShakeCamera(0.6f, 0.3f);
+                        // "저지했다" 쾌감 — 슬로모 연출: 0.25s 급 강한 히트스톱 + 파란 대형 링웨이브 + 셰이크.
+                        ProceduralVFX.Burst(bossPos, CBlue, 60, 11f, 0.55f, 0.6f);
+                        ProceduralVFX.RingWave(bossPos, CBlue, 6.5f, 0.5f);      // 대형 링웨이브
+                        ProceduralVFX.RingWave(bossPos, CSilver, 3.2f, 0.4f);    // 이중 링 코어(흰 섬광감)
+                        HitStopManager.HitStop(0.25f, 0.04f);                    // 급 강한 슬로모
+                        LostArkCamera.ShakeCamera(0.8f, 0.35f);
+                        Flash(CBlue, 0.22f);                                     // 짧은 파란 섬광
+                        break;
+                    }
+                    case "dash":
+                    {
+                        // 대시(돌진) — 시전 위치(uid)→도착(tx,ty) 청백 스트릭 + 출발점 소형 먼지. 가볍게.
+                        Vector3 from = UnitPos(snap, ev.uid, bossPos);
+                        Vector3 to = ToWorld(ev.tx, ev.ty);
+                        ProceduralVFX.Trail(from, to, CDashStreak);
+                        ProceduralVFX.Burst(from, CDashDust, 10, 2.6f, 0.24f, 0.32f);
                         break;
                     }
                     case "rush_pillar_hit":

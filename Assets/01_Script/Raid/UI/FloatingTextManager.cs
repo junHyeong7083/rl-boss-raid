@@ -53,6 +53,11 @@ namespace BossRaid
         private static readonly Color ColHealSkill = new Color(0.55f, 0.85f, 0.60f, 1f); // 치유(옅은 초록)
         private static readonly Color ColBuff      = new Color(0.55f, 0.80f, 0.95f, 1f); // 버프(하늘색)
         private static readonly Color ColGuard     = new Color(0.45f, 0.62f, 0.95f, 1f); // 가드(파랑)
+        private static readonly Color ColMiss      = new Color(1.00f, 0.30f, 0.25f, 1f); // 카운터 실패(붉은)
+
+        // ── 카운터 실패 플로터(붉은 소형, 짧게) ──
+        private const float MissLife = 0.7f;
+        private const int   MissFontSize = 18;
 
         private RectTransform _canvasRect;
         private BossGameViewer _viewer;
@@ -134,6 +139,15 @@ namespace BossRaid
                             guardShown = true;
                         }
                         continue;
+                    case "counter_miss":
+                    {
+                        // 카운터 실패 사유를 딜러 머리 위에 붉은 소형 텍스트로. (VFX 는 조용히)
+                        string msg = ev.reason == "angle" ? "정면이 아니다!"
+                                   : ev.reason == "range" ? "너무 멀다!"
+                                   : "빗나감!";
+                        SpawnMissLabel(ev.uid, msg, snap);
+                        continue;
+                    }
                 }
 
                 if (ev.type != "damage" && ev.type != "damage_taken" && ev.type != "heal") continue;
@@ -172,6 +186,23 @@ namespace BossRaid
                 crit = false,
             };
             Spawn(cfg, world + Vector3.up * SpawnHeight, label, SkillFontSize);
+        }
+
+        /// <summary>카운터 실패 사유 플로터: 딜러(uid) 머리 위 붉은 소형 텍스트 0.7s 상승 페이드.</summary>
+        private void SpawnMissLabel(int uid, string label, BossSnapshot snap)
+        {
+            if (!TryUnitWorld(uid, snap, out var world)) return;
+            var cfg = new Floater
+            {
+                colStart = ColMiss,
+                colEnd = ColMiss,
+                life = MissLife,
+                risePx = SkillRisePx,
+                spreadPx = Random.Range(-SpreadPxMax * 0.3f, SpreadPxMax * 0.3f),
+                rotDeg = 0f,
+                crit = false,
+            };
+            Spawn(cfg, world + Vector3.up * SpawnHeight, label, MissFontSize);
         }
 
         /// <summary>탱커(role==Tank) uid 조회. 가드 표기 대상.</summary>

@@ -21,7 +21,10 @@ from .config import (
 )
 from .boss import Boss, ActivePattern
 from .patterns import PATTERN_REGISTRY, PatternStep
-from .shapes import Shape, Pos, sample_danger_sensor, segment_intersects_circle
+from .shapes import (
+    Shape, Pos, sample_danger_sensor, segment_intersects_circle,
+    _point_in_line_segment,
+)
 from .rewards import RewardComputer
 
 
@@ -354,6 +357,7 @@ class RaidEnv:
             RaidActionID.BUFF_SHIELD: role == PartyRole.SUPPORT,
             RaidActionID.COUNTER: role == PartyRole.DEALER,
             RaidActionID.SKILL_2: role == PartyRole.DEALER,
+            RaidActionID.DASH: role == PartyRole.DEALER,
         }
         if not allowed.get(a, False):
             self.step_events[u.uid].append({"type": "invalid_action"})
@@ -416,8 +420,11 @@ class RaidEnv:
             u.cooldowns[int(a)] = cd
             self._do_buff(u, "shield")
         elif a == RaidActionID.COUNTER:
+            # 쿨다운은 _try_counter 내부에서 결정(성공=풀, 각도/거리 miss=절반).
+            self._try_counter(u, cd)
+        elif a == RaidActionID.DASH:
             u.cooldowns[int(a)] = cd
-            self._try_counter(u)
+            self._do_dash(u)
 
     # ────────────── 액션 효과 ──────────────
     def _do_attack(self, u: PartyUnit, skill: bool):
@@ -526,21 +533,72 @@ class RaidEnv:
             target.buff_shield = 3
         self.step_events[u.uid].append({"type": "buff", "target": target.uid, "kind": kind})
 
-    def _try_counter(self, u: PartyUnit):
-        """딜러 저지: 카운터 창 중 보스 전방 근접에서 성공."""
+    def _try_counter(self, u: PartyUnit, cd: int):
+        """딜러 저지: 카운터 창 중 보스 전방 근접에서 성공.
+
+        각도/거리 조건 밖 시도는 무시하지 않고 counter_miss(reason=angle|range) 이벤트를
+        방출하고 쿨다운을 절반만 적용(재시도 여지). 성공 시 풀 쿨다운.
+        """
+        cfg = self.config
+        half_cd = max(1, int(cd * cfg.counter_miss_cooldown_scale))
         if self.boss.counter_window_turns <= 0:
+            # 카운터 창이 없을 때의 헛 시도 — 절반 쿨(재시도 여지)
+            u.cooldowns[int(RaidActionID.COUNTER)] = half_cd
             self.step_events[u.uid].append({"type": "counter_whiff"})
             return
-        # 전방 판정
+        # 전방/거리 판정
         ang_to_boss = math.atan2(u.y - self.boss.y, u.x - self.boss.x)
         diff = abs((ang_to_boss - self.boss.facing + math.pi) % (2 * math.pi) - math.pi)
-        in_front = diff <= math.radians(self.config.counter_front_angle_deg) * 0.5
-        in_range = self._boss_dist(u.x, u.y) <= self.config.counter_range
+        in_front = diff <= math.radians(cfg.counter_front_angle_deg) * 0.5
+        in_range = self._boss_dist(u.x, u.y) <= cfg.counter_range
         if in_front and in_range:
+            u.cooldowns[int(RaidActionID.COUNTER)] = cd
             self._counter_success = True
             self.step_events[u.uid].append({"type": "counter_hit"})
         else:
-            self.step_events[u.uid].append({"type": "counter_whiff"})
+            reason = "range" if not in_range else "angle"
+            u.cooldowns[int(RaidActionID.COUNTER)] = half_cd
+            self.step_events[u.uid].append({"type": "counter_miss",
+                                            "uid": int(u.uid), "reason": reason})
+
+    def _do_dash(self, u: PartyUnit):
+        """딜러 회피 기동기 — 조준 방향으로 dash_distance 즉시 이동.
+
+        방향: aim_points 지정 시 그 지점 방향. 없으면 이번 턴 이동 방향, 그것도 없으면
+        보스 반대 방향(폴백). 이동 판정은 슬라이딩/탈출 규칙을 재사용 — 경로를 0.5
+        서브스텝으로 나눠 장애물(보스/기둥)에 막히면 그 앞까지만 이동(관통 금지).
+        Unity 잔상용 dash 이벤트(도착 좌표 tx/ty) 방출.
+        """
+        cfg = self.config
+        aim = self._aim_points.get(f"p{u.uid}")
+        if aim is not None:
+            dx = float(aim[0]) - u.x
+            dy = float(aim[1]) - u.y
+        else:
+            px, py = self._prev_unit_positions.get(u.uid, (u.x, u.y))
+            mdx, mdy = u.x - px, u.y - py
+            if abs(mdx) > 1e-6 or abs(mdy) > 1e-6:
+                dx, dy = mdx, mdy              # 이번 턴 이동 방향
+            else:
+                dx, dy = u.x - self.boss.x, u.y - self.boss.y   # 보스 반대 방향
+        d = math.hypot(dx, dy)
+        if d < 1e-6:
+            dx, dy, d = 1.0, 0.0, 1.0
+        ux, uy = dx / d, dy / d
+        remaining = cfg.dash_distance
+        substep = 0.5
+        while remaining > 1e-6:
+            s = min(substep, remaining)
+            nx = min(max(u.x + ux * s, u.radius), cfg.map_width - u.radius)
+            ny = min(max(u.y + uy * s, u.radius), cfg.map_height - u.radius)
+            if (nx == u.x and ny == u.y) or self._blocked_for_unit(u.uid, nx, ny):
+                break
+            u.x, u.y = nx, ny
+            remaining -= s
+        self.step_events[u.uid].append({
+            "type": "dash", "uid": int(u.uid),
+            "tx": float(u.x), "ty": float(u.y),
+        })
 
     # ────────────── 보스 관련 ──────────────
     def _boss_dist(self, x: float, y: float) -> float:
@@ -583,6 +641,10 @@ class RaidEnv:
         if step is None:
             self.boss.active_pattern = None
             return
+        # 폭주 돌진(표식 추격): windup 재베이크 + charge 이동을 전용 틱에서 처리
+        if step.kind == "rush_dash":
+            self._tick_rush(ap, step)
+            return
         # 붉은 낙인: shape 가 대상 위치를 따라감
         if step.kind == "brand":
             tuid = step.extra.get("target_uid")
@@ -593,10 +655,8 @@ class RaidEnv:
         ap.turns_remaining -= 1
         if ap.turns_remaining > 0:
             return
-        # 임팩트
-        if step.kind == "rush_dash":
-            self._impact_rush(ap, step)
-        elif step.kind == "brand":
+        # 임팩트 (rush_dash 는 _tick_rush 에서 별도 처리)
+        if step.kind == "brand":
             self._impact_brand(ap, step)
         else:
             self._impact_aoe(ap, step.damage)
@@ -622,60 +682,126 @@ class RaidEnv:
                                               "stun": self.config.guard_stun_turns})
         self._deal_damage_to_unit(u, dmg)
 
-    def _impact_rush(self, ap: ActivePattern, step: PatternStep):
-        # 직선 피해
-        self._impact_aoe(ap, step.damage)
-        # 보스 돌진 — 기둥/맵끝까지
+    # ── 폭주 돌진 "표식 추격 돌진" ──
+    def _rush_target_uid(self, ap: ActivePattern) -> Optional[int]:
+        return ap.target_uids[0] if ap.target_uids else None
+
+    def _rush_dir_to_target(self, ap: ActivePattern) -> Tuple[float, float]:
+        """보스 현재 위치 → 표식 타겟 현재 위치 방향 (타겟 사망 시 마지막 facing 유지)."""
         b = self.boss
-        ox, oy = ap.origin
-        dirx, diry = math.cos(ap.facing), math.sin(ap.facing)
-        R = self.config.boss_radius
-        # 맵 끝까지 t
-        edge_t = self._ray_edge_distance(ox, oy, dirx, diry)
+        tu = self.units.get(self._rush_target_uid(ap))
+        if tu is not None and tu.alive:
+            dx, dy = tu.x - b.x, tu.y - b.y
+        else:
+            dx, dy = math.cos(ap.facing), math.sin(ap.facing)
+        d = math.hypot(dx, dy)
+        if d < 1e-6:
+            return math.cos(ap.facing), math.sin(ap.facing)
+        return dx / d, dy / d
+
+    def _rebake_rush_telegraph(self, ap: ActivePattern):
+        """windup: 보스에게서 뻗어나오는 조준선을 매 턴 타겟 방향으로 재베이크."""
+        cfg = self.config
+        b = self.boss
+        dirx, diry = self._rush_dir_to_target(ap)
+        ap.facing = math.atan2(diry, dirx)
+        ap.origin = (b.x, b.y)
+        ap.extra["rush_dir"] = (dirx, diry)
+        tu = self.units.get(self._rush_target_uid(ap))
+        tdist = math.hypot(tu.x - b.x, tu.y - b.y) if (tu and tu.alive) else cfg.pat_rush_length_max
+        length = min(cfg.pat_rush_length_max, tdist + cfg.pat_rush_length_bonus)
+        hw = cfg.pat_rush_width * 0.5
+        ap.world_shapes = [Shape("line", {"ax": b.x, "ay": b.y,
+                                          "bx": b.x + dirx * length,
+                                          "by": b.y + diry * length, "hw": hw})]
+
+    def _rebake_charge_telegraph(self, ap: ActivePattern):
+        """charge: 남은 돌진 경로를 조준선으로 표시(FSM 회피/센서 호환)."""
+        cfg = self.config
+        b = self.boss
+        dirx, diry = ap.extra.get("rush_dir", (math.cos(ap.facing), math.sin(ap.facing)))
+        length = max(0.0, ap.extra.get("rush_charge_left", 0)) * cfg.pat_rush_charge_speed
+        hw = cfg.pat_rush_width * 0.5
+        ap.origin = (b.x, b.y)
+        ap.world_shapes = [Shape("line", {"ax": b.x, "ay": b.y,
+                                          "bx": b.x + dirx * length,
+                                          "by": b.y + diry * length, "hw": hw})]
+
+    def _tick_rush(self, ap: ActivePattern, step: PatternStep):
+        phase = ap.extra.get("rush_phase", "windup")
+        if phase == "windup":
+            # 매 턴 조준선 재베이크 (보스 현재 위치 → 타겟 현재 위치)
+            self._rebake_rush_telegraph(ap)
+            ap.turns_remaining -= 1
+            if ap.turns_remaining > 0:
+                return
+            # windup 종료 → charge 진입 (즉시 텔레포트 없음). fire 시점 방향 락.
+            self._rebake_rush_telegraph(ap)
+            ap.extra["rush_phase"] = "charge"
+            ap.extra["rush_charge_left"] = self.config.pat_rush_charge_turns
+            ap.extra["rush_hit_uids"] = set()
+            self._rebake_charge_telegraph(ap)
+            return
+        self._rush_charge_tick(ap, step)
+
+    def _rush_charge_tick(self, ap: ActivePattern, step: PatternStep):
+        """돌진 1턴: 보스가 fire 방향으로 charge_speed 만큼(0.5 서브스텝) 전진.
+        기둥 충돌 시 정지 + 파괴 + 그로기 + rush_pillar_hit, 벽 도달 시 정지.
+        경로폭 내 유닛은 시퀀스당 1회 피해(기존 데미지/가드 유지)."""
+        cfg = self.config
+        b = self.boss
+        dirx, diry = ap.extra.get("rush_dir", (math.cos(ap.facing), math.sin(ap.facing)))
+        b.facing = math.atan2(diry, dirx)
+        R = cfg.boss_radius
+        start = (b.x, b.y)
+        remaining = cfg.pat_rush_charge_speed
+        substep = 0.5
         hit_pillar = None
-        hit_t = edge_t
-        for p in self.pillars:
-            if not p.alive:
+        wall = False
+        while remaining > 1e-6:
+            s = min(substep, remaining)
+            nx = b.x + dirx * s
+            ny = b.y + diry * s
+            if not (R <= nx <= cfg.map_width - R and R <= ny <= cfg.map_height - R):
+                wall = True
+                break
+            for p in self.pillars:
+                if p.alive and math.hypot(nx - p.x, ny - p.y) < R + p.radius - 0.05:
+                    hit_pillar = p
+                    break
+            if hit_pillar is not None:
+                break
+            b.x, b.y = nx, ny
+            remaining -= s
+        end = (b.x, b.y)
+
+        # 경로폭 내 유닛 피해 (이번 턴 스윕 구간, 시퀀스당 1회)
+        hit_set = ap.extra.setdefault("rush_hit_uids", set())
+        hw = cfg.pat_rush_width * 0.5
+        for u in self.units.values():
+            if not u.alive or u.uid in hit_set:
                 continue
-            t = self._ray_circle_distance(ox, oy, dirx, diry, p.x, p.y, R + p.radius)
-            if t is not None and 0.0 < t < hit_t:
-                hit_t = t
-                hit_pillar = p
+            if _point_in_line_segment((u.x, u.y), start, end, hw + u.radius):
+                hit_set.add(u.uid)
+                self._hit_unit_with_guard(u, step.damage, ap)
+
         if hit_pillar is not None:
-            stop_t = max(0.0, hit_t)
-            b.x = min(max(ox + dirx * stop_t, R), self.config.map_width - R)
-            b.y = min(max(oy + diry * stop_t, R), self.config.map_height - R)
             hit_pillar.alive = False
-            hit_pillar.respawn_timer = self.config.pillar_respawn_turns
-            b.grog_turns = max(b.grog_turns, self.config.rush_pillar_grog_turns)
+            hit_pillar.respawn_timer = cfg.pillar_respawn_turns
+            b.grog_turns = max(b.grog_turns, cfg.rush_pillar_grog_turns)
             for uid in self.units:
                 self.step_events[uid].append({"type": "rush_pillar_hit",
-                                              "grog": self.config.rush_pillar_grog_turns})
+                                              "grog": cfg.rush_pillar_grog_turns})
+            self.boss.active_pattern = None
+            return
+        if wall:
+            self.boss.active_pattern = None
+            return
+        ap.extra["rush_charge_left"] = ap.extra.get("rush_charge_left", 0) - 1
+        if ap.extra["rush_charge_left"] <= 0:
+            self.boss.active_pattern = None
         else:
-            b.x = min(max(ox + dirx * edge_t, R), self.config.map_width - R)
-            b.y = min(max(oy + diry * edge_t, R), self.config.map_height - R)
-
-    def _ray_edge_distance(self, ox, oy, dx, dy) -> float:
-        ts = []
-        R = self.config.boss_radius
-        if dx > 1e-6:   ts.append((self.config.map_width - R - ox) / dx)
-        elif dx < -1e-6: ts.append((R - ox) / dx)
-        if dy > 1e-6:   ts.append((self.config.map_height - R - oy) / dy)
-        elif dy < -1e-6: ts.append((R - oy) / dy)
-        ts = [t for t in ts if t > 0]
-        return min(ts) if ts else 0.0
-
-    def _ray_circle_distance(self, ox, oy, dx, dy, cx, cy, radius) -> Optional[float]:
-        """원점에서 dir 방향 광선이 원(cx,cy,radius)에 처음 닿는 t (없으면 None)."""
-        mx = cx - ox; my = cy - oy
-        t_closest = mx * dx + my * dy
-        if t_closest < 0:
-            return None
-        perp2 = (mx * mx + my * my) - t_closest * t_closest
-        r2 = radius * radius
-        if perp2 > r2:
-            return None
-        return t_closest - math.sqrt(max(0.0, r2 - perp2))
+            self._rebake_charge_telegraph(ap)
 
     def _impact_brand(self, ap: ActivePattern, step: PatternStep):
         tuid = step.extra.get("target_uid")
@@ -970,6 +1096,14 @@ class RaidEnv:
     def get_snapshot(self) -> dict:
         b = self.boss
         ap = b.active_pattern
+        # 폭주 돌진 "표식 추격" 필드 — 비활성 시 rush_target=-1.
+        rush_ap = ap if (ap is not None and ap.mode == "steps"
+                         and int(ap.pattern_id) == int(PatternID.FRENZY_RUSH)) else None
+        if rush_ap is not None and rush_ap.target_uids:
+            rush_target = int(rush_ap.target_uids[0])
+            rush_left = int(rush_ap.extra.get("rush_charge_left", rush_ap.turns_remaining))
+        else:
+            rush_target, rush_left = -1, 0
         telegraphs = []
         for tg in b.telegraphs:  # steps 모드만
             telegraphs.append({
@@ -998,6 +1132,8 @@ class RaidEnv:
                 "vy": float(b.y - self._prev_boss_pos[1]),
                 "active_pattern": int(ap.pattern_id) if ap is not None else -1,
                 "active_mode": ap.mode if ap is not None else "",
+                "rush_target": rush_target,
+                "rush_left": rush_left,
             },
             "units": [
                 {

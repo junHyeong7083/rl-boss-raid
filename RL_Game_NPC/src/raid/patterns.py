@@ -164,12 +164,20 @@ class FrenzyRush(PatternDef):
         super().__init__(PatternID.FRENZY_RUSH, "FrenzyRush", cooldown=7)
 
     def build(self, cfg, rng, ctx, target_uid):
-        diag = math.hypot(cfg.map_width, cfg.map_height)
         hw = cfg.pat_rush_width * 0.5
-        # 단일 스텝: 직선 텔레그래프 → 발동 시 보스가 돌진 (kind=rush_dash)
-        # 중형 직선 돌진 windup → 1.8s = 6턴 (고피해라 반응 여유 확보)
+        # "표식 추격 돌진": 단일 스텝(kind=rush_dash). windup 동안 env 가 매 턴 조준선을
+        # 보스→타겟 현재 위치로 재베이크(origin=보스 위치)하고, 발동 시 그 시점 타겟
+        # 방향으로 보스가 실제로 이동(charge). 초기 길이는 재베이크 전 1턴용 근사치.
+        bx, by = ctx.get("boss_pos", (cfg.map_width / 2.0, cfg.map_height / 2.0))
+        tp = ctx.get("party", {}).get(target_uid)
+        if tp is not None:
+            length = min(cfg.pat_rush_length_max,
+                         math.hypot(tp[0] - bx, tp[1] - by) + cfg.pat_rush_length_bonus)
+        else:
+            length = cfg.pat_rush_length_max
         return [
-            PatternStep(6, [RelShape("line", {"angle_rel": 0.0, "hw": hw, "length": diag, "start": 0.0})],
+            PatternStep(cfg.pat_rush_windup_turns,
+                        [RelShape("line", {"angle_rel": 0.0, "hw": hw, "length": length, "start": 0.0})],
                         70, "rush", kind="rush_dash", extra={"enhanced": False}),
         ]
 

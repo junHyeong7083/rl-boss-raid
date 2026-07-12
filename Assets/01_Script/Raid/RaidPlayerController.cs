@@ -17,8 +17,10 @@ namespace BossRaid
     ///   W = 혈월 낙하(18, 조준형: AoE r3.0/사거리9/쿨7, cd "skill2")
     ///   Space = 기본공격(9, 조준형: AoE r1.2/사거리5/쿨 없음, cd 없음) — 롤 논스마트키식 설치기
     ///   E = 카운터(17, 즉시, cd "counter")
+    ///   Shift = 대시(19, 즉발 방향기: 조준 모드 없이 마우스 지면 포인트 방향으로 즉시 2.5 이동,
+    ///           서버가 거리 클램프. cd "dash" 17턴≈5s). 마우스 포인트 없으면 현재 이동 방향, 없으면 무시.
     ///   조준 중: 좌클릭 = 발사, 같은 키 재입력/Esc = 취소, 다른 조준 스킬 키 = 대상 전환,
-    ///            우클릭 이동은 그대로 동작(무빙 조준).
+    ///            우클릭 이동은 그대로 동작(무빙 조준). 대시는 조준 중에도 조준을 유지한 채 발동.
     ///
     /// 원칙:
     ///   - 스킬 발동은 즉시 전송(이동보다 우선). 그 턴의 이동 전송은 1회 스킵.
@@ -62,11 +64,23 @@ namespace BossRaid
         [SerializeField]
         private SkillBinding[] skills = new SkillBinding[]
         {
-            new SkillBinding { label = "혈창 투척", key = KeyCode.Q,     actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 3 },
-            new SkillBinding { label = "혈월 낙하", key = KeyCode.W,     actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 7 },
-            new SkillBinding { label = "카운터",   key = KeyCode.E,     actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 8 },
+            new SkillBinding { label = "혈창 투척", key = KeyCode.Q,     actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20 },
+            new SkillBinding { label = "혈월 낙하", key = KeyCode.W,     actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40 },
+            new SkillBinding { label = "카운터",   key = KeyCode.E,     actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 25 },
             new SkillBinding { label = "기본공격", key = KeyCode.Space, actionId = 9,  cooldownKey = "",        aimed = true,  range = 5f, aoeRadius = 1.2f, maxCooldown = 0 },
         };
+
+        [Header("Dash (Shift, 즉발 방향기 — skills 배열과 별도 처리)")]
+        [Tooltip("대시 입력 키. 기본 LeftShift.")]
+        [SerializeField] private KeyCode dashKey = KeyCode.LeftShift;
+        [Tooltip("대시 액션 ID (Python 계약: 19). SendActionAimed(19, tx, ty) 로 방향 지점 전달.")]
+        [SerializeField] private int dashActionId = 19;
+        [Tooltip("대시 쿨다운 스냅샷 키. 서버 cooldowns[\"dash\"].")]
+        [SerializeField] private string dashCooldownKey = "dash";
+        [Tooltip("대시 클라 예측 쿨다운(턴). 서버 17턴≈5s.")]
+        [SerializeField] private int dashCooldown = 17;
+        [Tooltip("대시 이동 거리(sim 단위 — 서버가 클램프). 마우스 폴백 조준점/체감 임펄스 산정용.")]
+        [SerializeField] private float dashDistanceSim = 2.5f;
 
         [Header("Movement")]
         [Tooltip("지면 평면 높이(y). 스냅샷 렌더는 y=0 평면을 쓴다.")]
@@ -223,10 +237,13 @@ namespace BossRaid
             // 2) 조준 모드: 레티클 갱신(무빙 조준) + 좌클릭 발사 + Esc 취소.
             HandleAimingMode();
 
-            // 3) 우클릭(누름/드래그): 목표 지점 갱신 + 마커 표시 + 즉시 전송. (조준 중에도 동작)
+            // 3) Shift = 대시: 조준 모드와 무관하게 즉발(조준 중이면 조준 유지). 쿨다운 가드.
+            HandleDashInput();
+
+            // 4) 우클릭(누름/드래그): 목표 지점 갱신 + 마커 표시 + 즉시 전송. (조준 중에도 동작)
             HandleMoveInput();
 
-            // 4) 도달 판정(예측 표시 위치 기준, 매 프레임): 마커가 늦게 꺼지는 느낌 방지.
+            // 5) 도달 판정(예측 표시 위치 기준, 매 프레임): 마커가 늦게 꺼지는 느낌 방지.
             if (_hasDestination && TryGetDealerDisplayPos(out var cur))
             {
                 Vector2 delta = new Vector2(_destination.x - cur.x, _destination.z - cur.z);
@@ -328,6 +345,76 @@ namespace BossRaid
             skillBar?.StartPredictedCooldown(sk.cooldownKey, sk.maxCooldown);
             _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬 우선)
             CancelAiming();
+        }
+
+        // ─────────────── 대시 (Shift, 즉발 방향기) ───────────────
+
+        /// <summary>
+        /// Shift 대시: 조준 모드 없이 즉발. 방향 지점(sim)을 SendActionAimed(19, tx, ty)로 전송하고
+        /// 서버가 그 방향으로 거리 클램프해 이동한다. 방향 우선순위: 마우스 지면 포인트 → 현재 이동
+        /// 방향 → (둘 다 없으면) 무시. 쿨다운 중이면 스킬바 흔들림. 조준 중이어도 조준을 유지.
+        /// </summary>
+        private void HandleDashInput()
+        {
+            if (!WasKeyPressedThisFrame(dashKey)) return;
+
+            // 쿨다운 가드: 서버 값과 클라 예측 쿨 중 큰 값. 쿨 중이면 흔들림 피드백(조준/이동 불변).
+            if (GetDashCooldown() > 0)
+            {
+                skillBar?.Shake(dashCooldownKey);
+                return;
+            }
+
+            if (!TryGetDashTarget(out Vector2 sim, out Vector3 worldDir)) return;
+
+            RaidSession.Instance?.SendActionAimed(dashActionId, sim.x, sim.y);
+            skillBar?.StartPredictedCooldown(dashCooldownKey, dashCooldown);
+
+            // 체감: 화면이 먼저 훅 나가도록 예측기에 즉시 임펄스(서버가 다음 스냅샷에 따라옴).
+            float cell = viewer != null ? viewer.cellSize : 1f;
+            _predictor?.DashImpulse(worldDir, dashDistanceSim * cell);
+
+            _skipMoveThisTurn = true;   // 이번 턴 이동 전송 스킵(스킬류 우선). 조준은 유지.
+        }
+
+        /// <summary>대시 목표(sim 좌표)와 월드 방향 산출. 마우스 지면 포인트 우선, 없으면 현재 이동 방향.</summary>
+        private bool TryGetDashTarget(out Vector2 sim, out Vector3 worldDir)
+        {
+            sim = default;
+            worldDir = Vector3.zero;
+            if (!TryGetDealerDisplayPos(out var dealerPos)) return false;
+            float cell = viewer != null ? viewer.cellSize : 1f;
+
+            // 1순위: 마우스 지면 포인트 방향(실제 포인트를 sim 으로 — 거리 클램프는 서버가 함).
+            if (TryGetGroundPoint(out var mouse))
+            {
+                Vector3 d = mouse - dealerPos; d.y = 0f;
+                if (d.sqrMagnitude > 1e-6f)
+                {
+                    worldDir = d.normalized;
+                    sim = WorldToSim(mouse);
+                    return true;
+                }
+            }
+
+            // 2순위: 현재 이동 방향(마지막 전송 이동 액션 1~8). 방향으로 dashDistanceSim 앞선 지점을 조준점으로.
+            Vector3 moveDir = DirForAction(_lastSentMoveAction);
+            if (moveDir.sqrMagnitude > 1e-6f)
+            {
+                worldDir = moveDir.normalized;
+                sim = WorldToSim(dealerPos + worldDir * (dashDistanceSim * cell));
+                return true;
+            }
+
+            return false;   // 방향 없음 → 무시
+        }
+
+        /// <summary>대시 유효 쿨다운 = max(서버 스냅샷 "dash", 스킬바 클라 예측).</summary>
+        private int GetDashCooldown()
+        {
+            int server = GetCooldown(dashCooldownKey);
+            int predicted = skillBar != null ? skillBar.GetEffectiveCooldown(dashCooldownKey) : 0;
+            return Mathf.Max(server, predicted);
         }
 
         /// <summary>월드 좌표 → sim 좌표 (viewer.ContinuousToWorld 의 역변환: 월드 x→sim x, 월드 z→sim y).</summary>
@@ -567,6 +654,8 @@ namespace BossRaid
                 case KeyCode.Alpha3: return Key.Digit3; case KeyCode.Alpha4: return Key.Digit4;
                 case KeyCode.Space: return Key.Space;
                 case KeyCode.Escape: return Key.Escape;
+                case KeyCode.LeftShift: return Key.LeftShift;
+                case KeyCode.RightShift: return Key.RightShift;
                 default: return Key.None;
             }
         }

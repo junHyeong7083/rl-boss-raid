@@ -53,6 +53,10 @@ namespace BossRaid
         public float ty;         // 시전 지점 y (sim 좌표)
         public float radius;     // 스킬 반경
         public bool hit;         // 보스 명중 여부
+
+        // ── 돌진/카운터 연출 필드 ──
+        // type=="counter_miss": 카운터 실패 사유. "angle"(정면이 아니다) | "range"(너무 멀다).
+        public string reason;
     }
 
     [Serializable]
@@ -77,6 +81,10 @@ namespace BossRaid
         public int counter_window;      // 카운터 창 남은 턴 (>0 이면 파란 발광)
         public int active_pattern;      // 현재 패턴 ID (-1=없음)
         public string active_mode;      // "steps"|"counter"|"stagger"|"seal"|""
+
+        // ── 돌진 표식 필드 (RushMarkView 소비) ──
+        public int rush_target;         // 돌진 조준 대상 uid (-1=비활성)
+        public int rush_left;           // 남은 windup 턴 (표식 조임 진행도 계산)
     }
 
     [Serializable]

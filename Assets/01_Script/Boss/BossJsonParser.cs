@@ -73,6 +73,8 @@ namespace BossRaid
                     ty = GetFloat(d, "ty"),
                     radius = GetFloat(d, "radius"),
                     hit = GetBool(d, "hit"),
+                    // counter_miss 사유 ("angle"|"range"). 없으면 null.
+                    reason = GetString(d, "reason"),
                 };
             }
             return arr;
@@ -101,6 +103,9 @@ namespace BossRaid
                 counter_window = GetInt(d, "counter_window"),
                 active_pattern = GetIntOrDefault(d, "active_pattern", -1),
                 active_mode = GetString(d, "active_mode") ?? "",
+                // ── 돌진 표식 (없으면 비활성) ──
+                rush_target = GetIntOrDefault(d, "rush_target", -1),
+                rush_left = GetInt(d, "rush_left"),
             };
         }
 
