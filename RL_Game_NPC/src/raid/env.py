@@ -1156,24 +1156,76 @@ class RaidEnv:
 
     # ── 전멸기 '혈월 강림' (LOS 은신) ──
     def _unit_hidden(self, u: PartyUnit) -> bool:
-        """유닛-보스 선분이 살아있는 기둥과 교차하면 은신."""
+        """유닛-보스 선분이 살아있는 기둥과 교차하면 은신.
+        기둥 반경을 seal_los_margin 만큼 확대해 그림자 원뿔을 넓힌다(파훼 관대화)."""
+        margin = self.config.seal_los_margin
         for p in self.pillars:
             if not p.alive:
                 continue
             if segment_intersects_circle((u.x, u.y), (self.boss.x, self.boss.y),
-                                         (p.x, p.y), p.radius):
+                                         (p.x, p.y), p.radius + margin):
                 return True
         return False
 
+    def _seal_sweep_order(self) -> List[Pillar]:
+        """전멸기 순차 폭발 순서 (중심 기준 atan2 내림차순 = 시계방향).
+        _seal_explode_next_pillar / _seal_forecast 가 공유하는 단일 정렬 소스."""
+        cx, cy = self.config.arena_center
+        return sorted(self.pillars, key=lambda p: math.atan2(p.y - cy, p.x - cx), reverse=True)
+
+    def _seal_forecast(self, ap: ActivePattern):
+        """남은 순차 폭발 스케줄(doomed)과 최종 생존 기둥을 시뮬레이션.
+        _tick_seal(경과 8/15/22턴에 _seal_explode_next_pillar) 와 동일 정렬·규칙을 사용해
+        스냅샷과 실제 폭발이 항상 일치하도록 한다.
+        반환: (doomed, surv)
+          doomed: [{"x","y","in"}] — 앞으로 폭발할 기둥과 폭발까지 남은 턴(in).
+          surv:   최종까지 살아남는 기둥(안전 원 기준). 없으면 None."""
+        order = self._seal_sweep_order()
+        alive = {id(p): p.alive for p in self.pillars}
+        done = ap.extra.get("explode_done", set())
+        elapsed = ap.total_this_step - ap.turns_remaining
+        doomed = []
+        for th in (8, 15, 22):
+            if th in done:
+                continue
+            if sum(1 for p in self.pillars if alive[id(p)]) <= 1:
+                continue   # 최소 1개 생존 보장 (tick 과 동일)
+            for p in order:
+                if alive[id(p)]:
+                    alive[id(p)] = False
+                    doomed.append({"x": float(p.x), "y": float(p.y),
+                                   "in": int(th - elapsed)})
+                    break
+        survivors = [p for p in order if alive[id(p)]]
+        surv = survivors[-1] if survivors else (order[-1] if order else None)
+        return doomed, surv
+
+    def _seal_safe_circle(self, ap: ActivePattern):
+        """생존 기둥 뒤(보스 반대편)의 초록 안전 원. 반환 (safe_x, safe_y, safe_r, doomed).
+        중심 = 생존기둥 중심 + normalize(기둥-보스) * (기둥반경 + safe_r).
+        '원 안 = 무조건 은신 성공' 불변식(test_seal_guide 9점 검증)."""
+        doomed, surv = self._seal_forecast(ap)
+        if surv is None:
+            return None
+        safe_r = self.config.seal_safe_circle_r
+        dx = surv.x - self.boss.x
+        dy = surv.y - self.boss.y
+        d = math.hypot(dx, dy)
+        if d < 1e-9:
+            nx, ny = 1.0, 0.0
+        else:
+            nx, ny = dx / d, dy / d
+        sx = surv.x + nx * (surv.radius + safe_r)
+        sy = surv.y + ny * (surv.radius + safe_r)
+        return (float(sx), float(sy), float(safe_r), doomed)
+
     def _seal_explode_next_pillar(self, ap: ActivePattern):
         """전멸기 진행 중 기둥 1개 시계방향 파괴 (중심 기준 각도 정렬). 최소 1개 생존 보장."""
-        cx, cy = self.config.arena_center
         alive = [p for p in self.pillars if p.alive]
         if len(alive) <= 1:
             return   # 최소 1개는 항상 생존
         # 시계방향 = 각도 내림차순. 살아있는 것 중 다음(첫 생존자)을 파괴하면 자연 스윕.
-        order = sorted(self.pillars, key=lambda p: math.atan2(p.y - cy, p.x - cx), reverse=True)
-        for p in order:
+        for p in self._seal_sweep_order():
             if p.alive:
                 p.alive = False
                 p.respawn_timer = self.config.pillar_respawn_turns
@@ -1426,27 +1478,40 @@ class RaidEnv:
                 "shapes": [s.to_dict() for s in tg.world_shapes],
                 "target_uids": [int(x) for x in tg.target_uids],
             })
+        boss_dict = {
+            "x": float(b.x), "y": float(b.y), "facing": float(b.facing),
+            "hp": int(b.hp), "max_hp": int(self.config.boss_max_hp),
+            "phase": int(b.phase),
+            "invuln": int(b.invuln_turns), "grog": int(b.grog_turns),
+            "stun": int(b.stun_turns),
+            "stagger_active": bool(b.stagger_active),
+            "stagger_gauge": float(b.stagger_gauge),
+            "stagger_max": float(self.config.stagger_max),
+            "counter_window": int(b.counter_window_turns),
+            "radius": float(self.config.boss_radius),
+            "arena_radius": float(self.arena_radius),
+            "vx": float(b.x - self._prev_boss_pos[0]),
+            "vy": float(b.y - self._prev_boss_pos[1]),
+            "active_pattern": int(ap.pattern_id) if ap is not None else -1,
+            "active_mode": ap.mode if ap is not None else "",
+            "rush_target": rush_target,
+            "rush_left": rush_left,
+        }
+        # 전멸기('혈월 강림') 활성 중에만 파훼 가이드(안전 원 + 폭발 스케줄) 포함.
+        # 비활성 시 "seal" 필드 생략(하위 호환).
+        if ap is not None and ap.mode == "seal":
+            sc = self._seal_safe_circle(ap)
+            if sc is not None:
+                safe_x, safe_y, safe_r, doomed = sc
+                boss_dict["seal"] = {
+                    "active": 1,
+                    "turns_left": int(ap.turns_remaining),
+                    "safe_x": safe_x, "safe_y": safe_y, "safe_r": safe_r,
+                    "doomed": doomed,
+                }
         return {
             "step": self.current_step,
-            "boss": {
-                "x": float(b.x), "y": float(b.y), "facing": float(b.facing),
-                "hp": int(b.hp), "max_hp": int(self.config.boss_max_hp),
-                "phase": int(b.phase),
-                "invuln": int(b.invuln_turns), "grog": int(b.grog_turns),
-                "stun": int(b.stun_turns),
-                "stagger_active": bool(b.stagger_active),
-                "stagger_gauge": float(b.stagger_gauge),
-                "stagger_max": float(self.config.stagger_max),
-                "counter_window": int(b.counter_window_turns),
-                "radius": float(self.config.boss_radius),
-                "arena_radius": float(self.arena_radius),
-                "vx": float(b.x - self._prev_boss_pos[0]),
-                "vy": float(b.y - self._prev_boss_pos[1]),
-                "active_pattern": int(ap.pattern_id) if ap is not None else -1,
-                "active_mode": ap.mode if ap is not None else "",
-                "rush_target": rush_target,
-                "rush_left": rush_left,
-            },
+            "boss": boss_dict,
             "units": [
                 {
                     "uid": int(u.uid), "role": int(u.role),

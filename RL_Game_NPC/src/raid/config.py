@@ -350,6 +350,13 @@ class RaidConfig:
     seal_wind_up_turns: int = 30
     seal_grog_turns: int = 8                  # 성공 시 딜타임 (파훼 보상 확대)
     # 판정: 유닛-보스 선분이 살아있는 기둥 원과 교차하면 "은신 성공"
+    # ── 파훼 가이드 (안전지대) ──
+    # seal_los_margin: 은신 판정 시 기둥 반경을 이만큼 확대(그림자 원뿔 확대 → 관대).
+    # seal_safe_circle_r: 서버가 계산해 스냅샷에 싣는 초록 안전 원의 반경.
+    #   안전 원 중심 = 최종 생존 기둥 중심 + normalize(기둥-보스) * (기둥반경 + safe_r).
+    #   "원 안 = 무조건 은신 성공" 이 불변식(테스트로 9점 검증).
+    seal_los_margin: float = 0.6
+    seal_safe_circle_r: float = 1.3
 
     # ── 탱커 가드 딜타임 ──
     guard_reduction: float = 0.8              # 피해 80% 경감

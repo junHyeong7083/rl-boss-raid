@@ -112,6 +112,35 @@ namespace BossRaid
                 // ── 원형 아레나 / 무력화 게이지 (없으면 0) ──
                 arena_radius = GetFloat(d, "arena_radius"),
                 stagger_max = GetInt(d, "stagger_max"),
+                // ── 전멸기 파훼 가이드 (seal 비활성 시 없음 → null, 하위 호환) ──
+                seal = ParseSeal(GetDict(d, "seal")),
+            };
+        }
+
+        // 전멸기 파훼 가이드(안전 원 + 폭발 스케줄). 관용 숫자 헬퍼 사용, 없으면 null.
+        private static SealData ParseSeal(Dictionary<string, object> d)
+        {
+            if (d == null) return null;
+            var doomedRaw = GetList(d, "doomed");
+            var doomed = new DoomedPillar[doomedRaw?.Count ?? 0];
+            for (int i = 0; i < doomed.Length; i++)
+            {
+                var dd = doomedRaw[i] as Dictionary<string, object>;
+                doomed[i] = new DoomedPillar
+                {
+                    x = GetFloat(dd, "x"),
+                    y = GetFloat(dd, "y"),
+                    in_turns = GetInt(dd, "in"),
+                };
+            }
+            return new SealData
+            {
+                active = GetInt(d, "active"),
+                turns_left = GetInt(d, "turns_left"),
+                safe_x = GetFloat(d, "safe_x"),
+                safe_y = GetFloat(d, "safe_y"),
+                safe_r = GetFloat(d, "safe_r"),
+                doomed = doomed,
             };
         }
 

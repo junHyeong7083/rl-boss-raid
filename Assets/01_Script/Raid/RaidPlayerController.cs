@@ -63,22 +63,25 @@ namespace BossRaid
         }
 
         // ─────────────── 조준 외곽 발광 팔레트 (HDR — 블룸 대응) ───────────────
-        // Q 진홍 / W 붉은 대형(더 진하게) / R 궁극 금색 / 평타·폴백 은백.
-        private static readonly Color AimCrimson = new Color(1.9f, 0.16f, 0.13f, 1f);  // Q 혈창: 진홍
-        private static readonly Color AimDeepRed = new Color(2.4f, 0.06f, 0.05f, 1f);  // W 혈월 낙하: 더 진한 붉은
-        private static readonly Color AimGold    = new Color(2.1f, 1.5f, 0.45f, 1f);   // R 처형: 금색
-        private static readonly Color AimSilver  = new Color(1.4f, 1.5f, 1.7f, 1f);    // 폴백: 은백
+        // 아군(플레이어) 스킬 = 청록/하늘/금 (적 보스 진홍과 구분). RaidPalette 단일 소스.
+        // Q 청록 / W 하늘 / R 궁극 금색(유지) / 평타·폴백 백청.
+        private static readonly Color AimTeal  = RaidPalette.AllyAimTeal;   // Q 혈창: 청록
+        private static readonly Color AimSky    = RaidPalette.AllyAimSky;    // W 혈월 낙하: 하늘
+        private static readonly Color AimGold   = RaidPalette.AllyAimGold;   // R 처형: 금색
+        private static readonly Color AimBasic  = RaidPalette.AllyAimBasic;  // 평타/폴백: 백청
 
-        /// <summary>스킬 조준 외곽색 결정: aimColor.alpha 0(씬 직렬화 누락) 이면 cooldownKey 팔레트로 폴백.</summary>
+        /// <summary>
+        /// 스킬 조준 외곽색 결정: 씬에 직렬화된 낡은 진홍 aimColor 는 무시하고 항상 코드 팔레트를
+        /// 사용한다(아군=청록/하늘/금). 씬 파일 편집 없이 팔레트 교체가 바로 반영되도록 하기 위함.
+        /// </summary>
         private static Color ResolveAimColor(SkillBinding sk)
         {
-            if (sk.aimColor.a > 0.001f) return sk.aimColor;   // 코드/인스펙터 지정값 우선
-            switch (sk.cooldownKey)                            // 씬 직렬화로 (0,0,0,0) 들어온 경우 폴백
+            switch (sk.cooldownKey)
             {
-                case "skill":  return AimCrimson;   // Q
-                case "skill2": return AimDeepRed;   // W
-                case "ult":    return AimGold;      // R
-                default:       return AimSilver;
+                case "skill":  return AimTeal;   // Q 혈창 투척 (청록)
+                case "skill2": return AimSky;    // W 혈월 낙하 (하늘)
+                case "ult":    return AimGold;   // R 혈월 처형 (금색)
+                default:       return AimBasic;  // 평타/폴백 (백청)
             }
         }
 
@@ -97,8 +100,8 @@ namespace BossRaid
         [SerializeField]
         private SkillBinding[] skills = new SkillBinding[]
         {
-            new SkillBinding { label = "혈창 투척", key = KeyCode.Q, actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20,  aimColor = AimCrimson },
-            new SkillBinding { label = "혈월 낙하", key = KeyCode.W, actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40,  aimColor = AimDeepRed },
+            new SkillBinding { label = "혈창 투척", key = KeyCode.Q, actionId = 10, cooldownKey = "skill",   aimed = true,  range = 7f, aoeRadius = 1.8f, maxCooldown = 20,  aimColor = AimTeal },
+            new SkillBinding { label = "혈월 낙하", key = KeyCode.W, actionId = 18, cooldownKey = "skill2",  aimed = true,  range = 9f, aoeRadius = 3.0f, maxCooldown = 40,  aimColor = AimSky },
             new SkillBinding { label = "카운터",   key = KeyCode.E, actionId = 17, cooldownKey = "counter", aimed = false, maxCooldown = 25 },
             new SkillBinding { label = "혈월 처형", key = KeyCode.R, actionId = 20, cooldownKey = "ult",     aimed = true,  range = 9f, aoeRadius = 4.0f, maxCooldown = 200, aimColor = AimGold },
         };
@@ -148,6 +151,8 @@ namespace BossRaid
         [SerializeField] private float reachThreshold = 0.35f;
         [Tooltip("이동 속도(sim/초). 서버 딜러 move_speed 1.0/턴 ÷ 턴 0.3s ≈ 3.33.")]
         [SerializeField] private float moveSpeedSim = 3.33f;
+        [Tooltip("즉시 정지 키(로스트아크/LoL 의 S). 이동 중 누르면 그 자리에 정지. None 이면 비활성.")]
+        [SerializeField] private KeyCode stopKey = KeyCode.S;
 
         [Header("Rotation (rotate-first 부스트 감각)")]
         [Tooltip("회전 선점 이후 방향 추종 Slerp 속도.")]
@@ -274,7 +279,7 @@ namespace BossRaid
             if (!InputActive())
             {
                 // 전투 외에는 마커/목표 숨김 + 조준 해제. 위치는 유지(다음 에피소드 리셋 warp 이 재배치).
-                if (_hasDestination) { _hasDestination = false; moveMarker?.HideImmediate(); }
+                if (_hasDestination) { _hasDestination = false; moveMarker?.FadeOut(); }
                 _dashGlideRemain = 0f;
                 if (_aiming != null) CancelAiming();
                 ResetInputBuffers();
@@ -298,6 +303,9 @@ namespace BossRaid
 
             // 5) G = 패링: 즉발(조준/방향 불요). 쿨다운 가드.
             HandleParryInput();
+
+            // 5.5) S = 즉시 정지: 이동 목표/경로 클리어(조준·대시는 유지).
+            HandleStopInput();
 
             // 6) 우클릭(누름/드래그): 목표 지점 갱신 + 마커 표시.
             HandleMoveInput();
@@ -631,6 +639,27 @@ namespace BossRaid
             return _dealerData.cooldowns.TryGetValue(key, out var v) ? v : 0;
         }
 
+        // ─────────────── 즉시 정지 (S — 로스트아크/LoL) ───────────────
+
+        /// <summary>
+        /// S 즉시 정지: 이동 목표/경로를 그 자리에서 클리어하고 마커를 페이드아웃한다. 위치는 클라
+        /// 권위라 목표만 지우면 다음 위치 보고가 정지 좌표를 보내 서버도 멈춘다(별도 액션 전송 불요).
+        /// 이동 정지로 실제 속도가 0 이 되면 UnitView 가 즉시 idle 애니로 전환한다.
+        /// - 조준 중(aim)에는 조준을 취소하지 않고 정지만 수행(조준 취소는 우클릭/ESC 유지).
+        /// - 대시 활강 중에는 무시(대시는 커밋된 동작).
+        /// </summary>
+        private void HandleStopInput()
+        {
+            if (stopKey == KeyCode.None || !WasKeyPressedThisFrame(stopKey)) return;
+            if (_dashGlideRemain > 0f) return;   // 대시 글라이드 중 — 무시(커밋된 동작)
+            if (_hasDestination)
+            {
+                _hasDestination = false;   // 이동 의도 클리어
+                moveMarker?.FadeOut();      // 즉시 사라짐이 아니라 페이드아웃
+            }
+            _turnBoosting = false;
+        }
+
         // ─────────────── 이동 입력 ───────────────
 
         private void HandleMoveInput()
@@ -679,7 +708,7 @@ namespace BossRaid
                 if (to.magnitude <= reachWorld)
                 {
                     _hasDestination = false;
-                    moveMarker?.HideImmediate();
+                    moveMarker?.FadeOut();   // 도착 시 페이드아웃(즉시 사라짐 아님)
                 }
                 else
                 {

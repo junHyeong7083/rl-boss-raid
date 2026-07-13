@@ -77,7 +77,7 @@ namespace BossRaid
                 new Vector2(0.5f, 1f), new Vector2(0.5f, 1f),
                 new Vector2(0f, -88f), new Vector2(820f, 40f));
             _subtitle.fontStyle = FontStyle.Bold;
-            _subtitle.text = "기둥 뒤로 숨어라!";
+            _subtitle.text = "초록 안전지대로 대피!";
 
             // ② 카운트다운 게이지
             RaidUIFactory.NewBar("SealCountdown", _root.transform,
@@ -228,7 +228,7 @@ namespace BossRaid
                     else
                     {
                         // 노출: 붉은색 강조 펄스
-                        _statusText.text = "노출됨! 기둥 뒤로!";
+                        _statusText.text = "노출됨! 초록 원으로!";
                         var c = Red;
                         c.a = 0.55f + 0.45f * pulse;
                         _statusText.color = c;

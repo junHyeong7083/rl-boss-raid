@@ -95,6 +95,34 @@ namespace BossRaid
         // ── 원형 아레나 / 무력화 게이지 ──
         public float arena_radius;      // 현재 유효 아레나 반경(sim). 0/미제공이면 경계 렌더 생략.
         public int stagger_max;         // 무력화 게이지 최대치(HUD 용, 상시 제공)
+
+        // ── 전멸기 '혈월 강림' 파훼 가이드 (seal 활성 중에만 제공, 아니면 null) ──
+        public SealData seal;           // 서버가 계산한 안전 원 + 순차 폭발 스케줄
+    }
+
+    /// <summary>
+    /// 전멸기(SEAL_WIPE) 파훼 가이드. boss.seal 로 직렬화되며 seal 비활성 시 필드 자체가 없다(null).
+    /// safe_x/safe_y/safe_r = 서버가 계산한 초록 안전 원(원 안=무조건 은신 성공 불변식).
+    /// doomed = 앞으로 순차 폭발할 기둥들(붉은 경고 링 대상).
+    /// </summary>
+    [Serializable]
+    public class SealData
+    {
+        public int active;              // 1=활성
+        public int turns_left;          // 전멸기 발동까지 남은 턴
+        public float safe_x;            // 안전 원 중심 (sim 좌표 → ContinuousToWorld)
+        public float safe_y;
+        public float safe_r;            // 안전 원 반경 (sim). 마커 스케일 = safe_r*2*cellSize
+        public DoomedPillar[] doomed;   // 남은 폭발 스케줄
+    }
+
+    /// <summary>순차 폭발 예정 기둥. in_turns = 폭발까지 남은 턴(JSON 키 "in").</summary>
+    [Serializable]
+    public class DoomedPillar
+    {
+        public float x;                 // 기둥 위치 (sim 좌표)
+        public float y;
+        public int in_turns;            // 폭발까지 남은 턴 (3 이하일 때 빠른 펄스)
     }
 
     [Serializable]

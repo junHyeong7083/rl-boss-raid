@@ -42,6 +42,12 @@ namespace BossRaid
         private static readonly Color CDashStreak = new Color(0.60f, 0.88f, 1.00f);  // 대시 잔상(청백)
         private static readonly Color CDashDust   = new Color(0.80f, 0.85f, 0.92f);  // 대시 출발점 먼지(옅은 회백)
 
+        // ─── 아군 스킬 팔레트(청록/하늘/금 — 적 보스 진홍과 구분). RaidPalette 단일 소스. ───
+        // 원칙: 플레이어/NPC 스킬 이펙트는 붉은 계열 금지. 보스 텔레그래프/이펙트만 진홍 유지.
+        private static readonly Color CAllyTeal = RaidPalette.AllyTeal;   // Q 혈창 투척(청록)
+        private static readonly Color CAllySky  = RaidPalette.AllySky;    // W 혈월 낙하(하늘)
+        // R 처형은 금색 유지(CGold) — 보스 red 와 이미 구분됨.
+
         // ─── 텔레그래프 스텝 발동 감지 상태 ───
         // key = "pattern:step_index". turns_remaining<=1 일 때 무장(arm)하고,
         // 다음 스냅샷에서 사라지면 "발동"으로 간주해 임팩트를 낸다(1→0 전환 근사).
@@ -273,29 +279,29 @@ namespace BossRaid
             }
             else if (ev.skill_id == "skill2")
             {
-                // W 혈월: 조준점 상공 8m 에서 수직 낙하(가속), 크고 붉은 구체 → 도착 시 대형 슬램 임팩트.
+                // W 혈월: 조준점 상공 8m 에서 수직 낙하(가속), 크고 하늘색 구체(아군) → 도착 시 대형 슬램 임팩트.
                 Vector3 from = p + Vector3.up * 8f;
-                LaunchProjectile(from, p, CCrimson, 0.35f, 0.9f, 0f, TrajKind.Drop,
+                LaunchProjectile(from, p, CAllySky, 0.35f, 0.9f, 0f, TrajKind.Drop,
                     () => ImpactSkillW(ev, p, r, bossPos));
             }
             else if (ev.skill_id == "ult")
             {
-                // R 혈월 처형(궁극): 시전 순간 슬로모+강 셰이크(+PostFX), 상공 12m 거대 혈월 구체 낙하 → 대형 착탄.
+                // R 혈월 처형(궁극): 시전 순간 슬로모+강 셰이크(+PostFX), 상공 12m 거대 금색 구체 낙하 → 대형 착탄.
                 // ① 시전 순간 연출(즉시).
                 HitStopManager.HitStop(0.2f);
                 LostArkCamera.ShakeCamera(0.5f, 0.3f);
                 TryPostFX("PunchAberration", 0.4f);      // 자체 감쇠 펄스 — 원복 불필요
                 // NOTE: SetCinematicDoF 는 켜기/끄기 쌍이 필요한 상태성 효과라 궁극기에서 쓰지 않는다
                 // (끄는 호출이 없어 화면이 계속 흐려진 채 남던 버그). DoF 는 데스캠/결과 화면 전용.
-                // ② 조준점 상공 12m 에서 거대 혈월 구체(확대 Drop 투사체) 0.6s 낙하 → 착탄 임팩트.
+                // ② 조준점 상공 12m 에서 거대 금색 구체(확대 Drop 투사체) 0.6s 낙하 → 착탄 임팩트(아군=금색 유지).
                 Vector3 from = p + Vector3.up * 12f;
-                LaunchProjectile(from, p, CCrimson, 0.6f, 1.8f, 0f, TrajKind.Drop,
+                LaunchProjectile(from, p, CGold, 0.6f, 1.8f, 0f, TrajKind.Drop,
                     () => ImpactUltimate(ev, p, r, bossPos));
             }
             else
             {
-                // Q 혈창: 0.18s 직선+살짝 포물선(중간 높이 +1.2), 길쭉한 진홍 창 → 도착 시 관통 임팩트.
-                LaunchProjectile(DealerCastOrigin(p), p, CCrimson, 0.18f, 0.45f, 1.2f, TrajKind.Arc,
+                // Q 혈창: 0.18s 직선+살짝 포물선(중간 높이 +1.2), 길쭉한 청록 창(아군) → 도착 시 관통 임팩트.
+                LaunchProjectile(DealerCastOrigin(p), p, CAllyTeal, 0.18f, 0.45f, 1.2f, TrajKind.Arc,
                     () => ImpactSkillQ(ev, p, r, bossPos));
             }
         }
@@ -341,9 +347,9 @@ namespace BossRaid
             if (ev.hit)
             {
                 ProceduralVFX.Burst(p, CGold, 34, 7.5f, 0.45f, 0.5f);            // 버스트 상향
-                ProceduralVFX.Burst(p, CCrimson, 22, 5.5f, 0.4f, 0.45f);
+                ProceduralVFX.Burst(p, CAllyTeal, 22, 5.5f, 0.4f, 0.45f);        // 아군 청록(진홍 교체)
                 ProceduralVFX.RingWave(p, CGold, r * 1.25f, 0.4f);              // 반경 확대
-                ProceduralVFX.Debris(p, CCrimson);
+                ProceduralVFX.Debris(p, CAllyTeal);
                 ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CGold, 22, 5.5f, 0.32f, 0.38f);
                 LostArkCamera.ShakeCamera(0.12f * (ev.crit ? 1.5f : 1f), 0.16f);
                 if (ev.crit)
@@ -363,56 +369,56 @@ namespace BossRaid
         private void ImpactSkillW(EventData ev, Vector3 p, float r, Vector3 bossPos)
         {
             Color decalBase, decalOutline; float peakAlpha;
-            if (ev.hit && ev.crit)  { decalBase = CCrimson; decalOutline = CRed * 3.2f;  peakAlpha = 0.95f; }
-            else if (ev.hit)        { decalBase = CCrimson; decalOutline = CRed * 2.3f;  peakAlpha = 0.7f; }
-            else                    { decalBase = CBrown;   decalOutline = CBrown * 1.3f; peakAlpha = 0.3f; }
+            if (ev.hit && ev.crit)  { decalBase = CAllySky; decalOutline = CGold * 3.2f;    peakAlpha = 0.95f; }
+            else if (ev.hit)        { decalBase = CAllySky; decalOutline = CAllySky * 2.3f;  peakAlpha = 0.7f; }
+            else                    { decalBase = CBrown;   decalOutline = CBrown * 1.3f;    peakAlpha = 0.3f; }
             FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.35f);   // 잔광 0.35s
 
-            // 슬램은 명중 여부와 무관하게 지면 충격(무게감).
-            ProceduralVFX.Burst(p, CCrimson, 52, 9f, 0.6f, 0.6f);               // 버스트 대폭 상향
-            ProceduralVFX.RingWave(p, CCrimson, r * 1.3f, 0.5f);               // 반경 확대(외곽)
-            ProceduralVFX.RingWave(p, CRed, r * 0.7f, 0.35f);                  // 이중 링(내곽)
+            // 슬램은 명중 여부와 무관하게 지면 충격(무게감). 아군 하늘색(진홍 교체).
+            ProceduralVFX.Burst(p, CAllySky, 52, 9f, 0.6f, 0.6f);              // 버스트 대폭 상향
+            ProceduralVFX.RingWave(p, CAllySky, r * 1.3f, 0.5f);              // 반경 확대(외곽)
+            ProceduralVFX.RingWave(p, CAllyTeal, r * 0.7f, 0.35f);            // 이중 링(내곽)
             ProceduralVFX.Debris(p, CBrown);
             LostArkCamera.ShakeCamera(0.25f * (ev.crit ? 1.5f : 1f), 0.28f);    // 강한 셰이크
             HitStopManager.HitStop(ev.crit ? 0.12f : 0.07f);                    // 무게감(크리 유지)
 
             if (ev.crit)
             {
-                Flash(CRed, 0.35f);
+                Flash(CAllySky, 0.35f);
                 ProceduralVFX.Burst(p, CGold, 44, 10f, 0.65f, 0.5f);           // 크리 대형 플래시
             }
             if (ev.hit)
-                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CCrimson, 24, 6f, 0.35f, 0.4f);
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.2f, CAllySky, 24, 6f, 0.35f, 0.4f);
         }
 
         /// <summary>R 궁극 '혈월 처형' 착탄: 3중 링웨이브(실판정 r 일치) + 대형 버스트 + 붉은 플래시 +
         /// 강 셰이크 + 잔광 데칼 0.6s. 무게감을 위해 명중 여부와 무관하게 지면 충격을 낸다.</summary>
         private void ImpactUltimate(EventData ev, Vector3 p, float r, Vector3 bossPos)
         {
-            // 잔광 데칼 0.6s (명중/크리/빗나감 분기).
+            // 잔광 데칼 0.6s (명중/크리/빗나감 분기). 아군 궁극 = 금색 signature(진홍 교체).
             Color decalBase, decalOutline; float peakAlpha;
-            if (ev.hit && ev.crit)  { decalBase = CCrimson; decalOutline = CGold * 3.4f;  peakAlpha = 1.0f; }
-            else if (ev.hit)        { decalBase = CCrimson; decalOutline = CRed * 2.6f;   peakAlpha = 0.85f; }
-            else                    { decalBase = CBrown;   decalOutline = CBrown * 1.4f;  peakAlpha = 0.4f; }
+            if (ev.hit && ev.crit)  { decalBase = CGold;  decalOutline = CGold * 3.4f;   peakAlpha = 1.0f; }
+            else if (ev.hit)        { decalBase = CGold;  decalOutline = CGold * 2.6f;   peakAlpha = 0.85f; }
+            else                    { decalBase = CBrown; decalOutline = CBrown * 1.4f;  peakAlpha = 0.4f; }
             FlashImpactDecal(p, r, decalBase, decalOutline, peakAlpha, 0.6f);
 
-            // 3중 링웨이브(외곽 진홍 → 중간 적 → 내곽 금). 외곽 반경은 실판정 r 에 맞춤.
-            ProceduralVFX.RingWave(p, CCrimson, r * 1.4f, 0.6f);
-            ProceduralVFX.RingWave(p, CRed,     r * 1.0f, 0.5f);
+            // 3중 링웨이브(외곽 금 → 중간 하늘 → 내곽 금). 외곽 반경은 실판정 r 에 맞춤.
+            ProceduralVFX.RingWave(p, CGold,    r * 1.4f, 0.6f);
+            ProceduralVFX.RingWave(p, CAllySky, r * 1.0f, 0.5f);
             ProceduralVFX.RingWave(p, CGold,    r * 0.6f, 0.4f);
 
             // 대형 버스트 + 파편.
-            ProceduralVFX.Burst(p, CCrimson, 80, 12f, 0.75f, 0.7f);
-            ProceduralVFX.Burst(p, CGold,    50, 10f, 0.6f, 0.5f);
+            ProceduralVFX.Burst(p, CGold,    80, 12f, 0.75f, 0.7f);
+            ProceduralVFX.Burst(p, CAllySky, 50, 10f, 0.6f, 0.5f);
             ProceduralVFX.Debris(p, CBrown);
 
-            // 화면 붉은 플래시 + 강 셰이크 + 무게감 히트스톱.
-            Flash(CRed, 0.5f);
+            // 화면 금색 플래시 + 강 셰이크 + 무게감 히트스톱.
+            Flash(CGold, 0.5f);
             LostArkCamera.ShakeCamera(0.6f, 0.4f);
             HitStopManager.HitStop(ev.crit ? 0.18f : 0.12f);
 
             if (ev.hit)
-                ProceduralVFX.Burst(bossPos + Vector3.up * 1.4f, CCrimson, 30, 7f, 0.4f, 0.45f);
+                ProceduralVFX.Burst(bossPos + Vector3.up * 1.4f, CGold, 30, 7f, 0.4f, 0.45f);
         }
 
         // ─────────────── 투사체 발사 + 풀링 ───────────────

@@ -53,6 +53,9 @@ namespace BossRaid
         private Transform _ring;       // 사거리 링 (딜러 중심)
         private Transform _reticle;    // AoE 레티클 (조준 지점)
         private Transform _dirLine;    // 방향선 (딜러 → 레티클 중심)
+        private Material _ringMat;     // 스킬별 색 추종용(사거리 링)
+        private Material _reticleMat;  // 스킬별 색 추종용(지면 조준 원)
+        private Material _dirLineMat;  // 스킬별 색 추종용(방향선)
         private float _rangeWorld;     // 사거리(월드 단위)
         private float _aoeWorld;       // AoE 실반경(월드 단위) — 확정 마커 크기 기준
         private bool _active;
@@ -88,6 +91,11 @@ namespace BossRaid
             // 방향선: 딜러 위치 → 레티클 중심을 잇는 얇은 발광 선(청록).
             _dirLine = BuildLineQuad("AimDirLine", dirLineColor);
 
+            // 스킬별 색 추종을 위해 각 요소의 머티리얼 캐시(고유 인스턴스).
+            _ringMat = MatOf(_ring);
+            _reticleMat = MatOf(_reticle);
+            _dirLineMat = MatOf(_dirLine);
+
             // 확정 마커: 청록 채움 원(두꺼운 테두리). 조준 종료 후에도 독립적으로 잔존하며 수축.
             _confirm = BuildCircleQuad("ConfirmMarker", confirmColor, confirmOutline,
                 fill: 1f, outlineWidth: 0.14f, unfilledAlpha: 0.55f);
@@ -118,7 +126,39 @@ namespace BossRaid
             _reticle.gameObject.SetActive(true);
             if (_dirLine != null) _dirLine.gameObject.SetActive(true);
 
+            // 지면 조준 원/사거리 링/방향선이 스킬 색(aimColor)을 따라가게 틴트(적 붉은 장판과 구분).
+            ApplyAimColor(edgeColor);
             ShowEdge(edgeColor);
+        }
+
+        /// <summary>스킬 조준 색으로 지면 요소(링/레티클/방향선) 틴트. base 는 클램프, outline 은 HDR 유지.</summary>
+        private void ApplyAimColor(Color c)
+        {
+            if (c.a <= 0.001f) c = edgeFallbackColor;   // 방어: 색 누락 시 폴백
+            Color b = new Color(Mathf.Clamp01(c.r), Mathf.Clamp01(c.g), Mathf.Clamp01(c.b));
+            TintGround(_ringMat, b, ringColor.a, c);
+            TintGround(_reticleMat, b, reticleColor.a, c);
+            if (_dirLineMat != null)
+            {
+                Color lc = new Color(b.r, b.g, b.b, dirLineColor.a);
+                if (_dirLineMat.HasProperty("_Color")) _dirLineMat.SetColor("_Color", lc);
+                else _dirLineMat.color = lc;
+            }
+        }
+
+        private static void TintGround(Material m, Color baseCol, float alpha, Color hdrOutline)
+        {
+            if (m == null) return;
+            Color bc = baseCol; bc.a = alpha;
+            if (m.HasProperty("_Color")) m.SetColor("_Color", bc); else m.color = bc;
+            if (m.HasProperty("_OutlineColor")) m.SetColor("_OutlineColor", hdrOutline);
+        }
+
+        private static Material MatOf(Transform t)
+        {
+            if (t == null) return null;
+            var mr = t.GetComponent<MeshRenderer>();
+            return mr != null ? mr.sharedMaterial : null;
         }
 
         // ─────────────── 화면 외곽 발광 오버레이 ───────────────

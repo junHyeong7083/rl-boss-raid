@@ -24,6 +24,7 @@ import socket
 import subprocess
 import sys
 import time
+import types
 
 from src.raid import (
     RaidEnv, RaidConfig, FSMNpcPolicy, PartyRole, PatternID, RaidActionID,
@@ -372,6 +373,66 @@ def test_seal_fail():
             break
     check(all(not u.alive for u in env.units.values()), "노출 시 전원 즉사(wipe)")
     check(cine_end_fail, "cinematic_end success=False")
+
+
+def _seal_safe_points(safe_x, safe_y, safe_r):
+    """안전 원의 중심 + 둘레 8점 = 9점."""
+    pts = [(safe_x, safe_y)]
+    for k in range(8):
+        th = k * math.pi / 4
+        pts.append((safe_x + math.cos(th) * safe_r, safe_y + math.sin(th) * safe_r))
+    return pts
+
+
+def test_seal_guide():
+    print("\n== 6c) 전멸기 파훼 가이드 (안전 원 + doomed 스케줄) ==")
+    cfg = RaidConfig()
+    # (d) seal 비활성 시 boss.seal 필드 없음 (하위 호환)
+    env = RaidEnv(cfg, seed=31)
+    env.reset(seed=31)
+    check("seal" not in env.get_snapshot()["boss"], "seal 비활성 시 boss.seal 필드 없음")
+    # 전멸기 강제 발동 (보스 중심 고정)
+    env = RaidEnv(cfg, seed=23)
+    env.reset(seed=23)
+    env.boss.x, env.boss.y = 10.0, 10.0
+    env.force_seal()
+    seal = env.get_snapshot()["boss"].get("seal")
+    # (a) 스냅샷에 seal 필드 존재 + 스키마
+    check(seal is not None, "seal 활성 시 boss.seal 존재")
+    if seal is None:
+        return
+    need = {"active", "turns_left", "safe_x", "safe_y", "safe_r", "doomed"}
+    check(need.issubset(set(seal.keys())), f"seal 스키마 {sorted(seal.keys())}")
+    check(seal.get("active") == 1, "seal.active=1")
+    check(abs(seal.get("safe_r", 0) - cfg.seal_safe_circle_r) < 1e-6, "safe_r = config 값")
+    # (c) doomed 초기 스케줄 (3개 예정, in 오름차순 8/15/22 - elapsed)
+    doomed0 = [(round(dd["x"], 4), round(dd["y"], 4)) for dd in seal["doomed"]]
+    check(len(doomed0) == 3, f"초기 doomed 3개 예정 ({len(doomed0)})")
+    ins = [dd["in"] for dd in seal["doomed"]]
+    check(ins == sorted(ins) and all(v > 0 for v in ins), f"doomed in 오름차순·양수 ({ins})")
+    # 진행하며 (b) 안전 원 9점 은신 판정 + (c) 실제 폭발 순서 수집
+    exploded = []
+    all_hidden_ok = True
+    checked_snaps = 0
+    for _ in range(cfg.seal_wind_up_turns + 2):
+        env.step(_stay())
+        # pillar_explode 는 uid 별로 중복 방출되므로 단일 uid(0) 이벤트만 집계.
+        for e in env.step_events.get(0, []):
+            if e.get("type") == "pillar_explode":
+                exploded.append((round(e["x"], 4), round(e["y"], 4)))
+        s = env.get_snapshot()["boss"].get("seal")
+        if s is not None:
+            checked_snaps += 1
+            for (px, py) in _seal_safe_points(s["safe_x"], s["safe_y"], s["safe_r"]):
+                if not env._unit_hidden(types.SimpleNamespace(x=px, y=py)):
+                    all_hidden_ok = False
+        if env.boss.active_pattern is None:
+            break
+    # (b) 안전 원 둘레+중심 9점이 매 스냅샷 은신 판정을 통과 (불변식)
+    check(checked_snaps > 0, "seal 스냅샷 수집됨")
+    check(all_hidden_ok, "안전 원 9점 전부 은신 판정 통과(원 안=무조건 은신 불변식)")
+    # (c) doomed 스케줄이 실제 폭발 순서와 일치
+    check(exploded == doomed0, f"doomed 스케줄 == 실제 폭발 순서 (예정 {doomed0} vs 실제 {exploded})")
 
 
 # ─────────────────── 7. 딜러 방향 라인 평타 / Q·W / 궁극기 ───────────────────
@@ -1036,6 +1097,7 @@ def main():
     test_counter_fail_rush()
     test_seal_success()
     test_seal_fail()
+    test_seal_guide()
     test_basic_lineshot()
     test_aim_skills()
     test_ultimate()

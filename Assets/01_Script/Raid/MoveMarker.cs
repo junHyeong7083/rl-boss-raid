@@ -1,13 +1,17 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace BossRaid
 {
     /// <summary>
-    /// 로스트아크식 우클릭 이동 마커. 클릭 지점 지면에 초록/청록 링을 표시하고
-    /// 0.5초 스케일 축소 후 페이드아웃한다. 도달(HideImmediate) 시 즉시 사라진다.
+    /// 로스트아크식 우클릭 이동 마커. 클릭 지점 지면에 청록 링을 표시하고, 도착/취소/새 지점
+    /// 클릭 시 모두 "페이드아웃"(알파 서서히 0 + 살짝 스케일 축소)으로 사라진다.
     ///
-    /// 프리팹 불요 — Awake 에서 바닥 Quad 메시(콜라이더 없음)를 코드 생성하고
-    /// 기존 BossRaid/Telegraph 셰이더(circle, _Fill=0 → 링 룩)를 재활용한다.
+    /// 재사용 풀(2개+): 페이드 중 새 지점을 클릭하면 기존 마커의 페이드는 그대로 두고 새 마커를
+    /// 즉시 표시한다(두 마커가 잠깐 공존). MaterialPropertyBlock 으로 알파를 애니메이션한다
+    /// (셰이더 추가 없음 — 기존 BossRaid/Telegraph circle 재활용).
+    ///
+    /// 프리팹 불요 — 링 Quad(콜라이더 없음)를 코드 생성한다.
     /// </summary>
     public class MoveMarker : MonoBehaviour
     {
@@ -22,143 +26,207 @@ namespace BossRaid
         [SerializeField] private Color outlineColor = new Color(0.35f, 2.6f, 1.3f, 1f);
 
         [Header("Animation")]
-        [Tooltip("스케일 축소 구간(초).")]
-        [SerializeField] private float shrinkDuration = 0.5f;
-        [Tooltip("축소 후 페이드 구간(초).")]
-        [SerializeField] private float fadeDuration = 0.35f;
+        [Tooltip("등장 정착(스케일 안정) 시간(초).")]
+        [SerializeField] private float introDuration = 0.15f;
+        [Tooltip("페이드아웃 시간(초) — 도착/취소/새 지점 클릭 시. 0.25~0.35 권장.")]
+        [SerializeField] private float fadeDuration = 0.3f;
+        [Tooltip("등장 시 시작 스케일 배수(→ 1 로 정착).")]
         [SerializeField] private float startScaleMul = 1.35f;
-        [SerializeField] private float endScaleMul = 0.7f;
+        [Tooltip("페이드아웃 종료 스케일 배수(살짝 축소).")]
+        [SerializeField] private float endScaleMul = 0.8f;
 
-        private Renderer _renderer;
-        private MaterialPropertyBlock _mpb;
         private Transform _tr;
-        private bool _playing;
-        private float _elapsed;
+        private readonly List<Ping> _pings = new List<Ping>();
+        private Ping _active;   // 현재 조작 대상(드래그 이동 / 페이드 대상)
 
-        private void Awake()
-        {
-            _tr = transform;
-            BuildQuad();
-            HideImmediate();
-        }
+        private void Awake() { _tr = transform; }
 
         // ─────────────── 공개 API ───────────────
 
-        /// <summary>클릭 지점에 마커를 놓고 축소+페이드 애니메이션을 재생.</summary>
+        /// <summary>클릭 지점에 새 마커를 놓는다. 기존 활성 마커는 페이드아웃으로 보낸다.</summary>
         public void Show(Vector3 worldPoint)
         {
-            MoveTo(worldPoint);
-            _elapsed = 0f;
-            _playing = true;
-            gameObject.SetActive(true);
-            ApplyVisual(startScaleMul, 1f);
+            FadeOut();                       // 기존 활성 마커 → 페이드아웃(연출 유지)
+            worldPoint.y += groundLift;
+            _active = Acquire();
+            _active.Begin(worldPoint);
         }
 
-        /// <summary>애니메이션 재생 없이 마커 위치만 갱신(드래그 중).</summary>
+        /// <summary>드래그 중 활성 마커 위치만 갱신(애니메이션 재생 없음).</summary>
         public void MoveTo(Vector3 worldPoint)
         {
-            worldPoint.y = worldPoint.y + groundLift;
-            if (_tr == null) _tr = transform;
-            _tr.position = worldPoint;
+            if (_active == null) return;
+            worldPoint.y += groundLift;
+            _active.SetPosition(worldPoint);
         }
 
-        /// <summary>도달/전투 종료 시 즉시 숨김.</summary>
+        /// <summary>도착/취소/정지 시 활성 마커를 페이드아웃(즉시 사라짐 아님).</summary>
+        public void FadeOut()
+        {
+            if (_active != null) { _active.BeginFade(); _active = null; }
+        }
+
+        /// <summary>전투 종료/워프 등 하드 리셋 — 모든 마커 즉시 숨김.</summary>
         public void HideImmediate()
         {
-            _playing = false;
-            gameObject.SetActive(false);
+            for (int i = 0; i < _pings.Count; i++) _pings[i].HideImmediate();
+            _active = null;
         }
-
-        // ─────────────── 애니메이션 ───────────────
 
         private void Update()
         {
-            if (!_playing) return;
-            _elapsed += Time.deltaTime;
-
-            float total = shrinkDuration + fadeDuration;
-            if (_elapsed >= total) { HideImmediate(); return; }
-
-            if (_elapsed <= shrinkDuration)
-            {
-                // 축소 구간: 큰 링 → 작은 링, 알파 유지.
-                float t = shrinkDuration > 0f ? _elapsed / shrinkDuration : 1f;
-                float scaleMul = Mathf.Lerp(startScaleMul, endScaleMul, t);
-                ApplyVisual(scaleMul, 1f);
-            }
-            else
-            {
-                // 페이드 구간: 스케일 고정, 알파 → 0.
-                float t = fadeDuration > 0f ? (_elapsed - shrinkDuration) / fadeDuration : 1f;
-                ApplyVisual(endScaleMul, Mathf.Lerp(1f, 0f, t));
-            }
+            float dt = Time.deltaTime;
+            for (int i = 0; i < _pings.Count; i++) _pings[i].Tick(dt);
         }
 
-        private void ApplyVisual(float scaleMul, float alpha)
+        private Ping Acquire()
         {
-            if (_tr == null) _tr = transform;
-            float s = markerSize * scaleMul;
-            _tr.localScale = new Vector3(s, s, s);
-
-            if (_renderer == null) return;
-            if (_mpb == null) _mpb = new MaterialPropertyBlock();
-            _renderer.GetPropertyBlock(_mpb);
-            var c = baseColor; c.a = baseColor.a * alpha;
-            var o = outlineColor; o.a = outlineColor.a * alpha;
-            _mpb.SetColor("_Color", c);
-            _mpb.SetColor("_OutlineColor", o);
-            _renderer.SetPropertyBlock(_mpb);
+            for (int i = 0; i < _pings.Count; i++)
+                if (!_pings[i].InUse) return _pings[i];
+            var ping = new Ping(_tr, markerSize, baseColor, outlineColor,
+                                introDuration, fadeDuration, startScaleMul, endScaleMul);
+            _pings.Add(ping);
+            return ping;
         }
 
-        // ─────────────── 메시/머티리얼 생성 ───────────────
+        // ─────────────── 개별 마커(핑) ───────────────
 
-        /// <summary>바닥에 눕힌 1x1 Quad(노멀 +Y). 셰이더가 Cull Off 라 와인딩 무관.</summary>
-        private void BuildQuad()
+        private class Ping
         {
-            var mf = gameObject.GetComponent<MeshFilter>();
-            if (mf == null) mf = gameObject.AddComponent<MeshFilter>();
-            var mr = gameObject.GetComponent<MeshRenderer>();
-            if (mr == null) mr = gameObject.AddComponent<MeshRenderer>();
+            private enum St { Idle, Intro, Hold, Fade }
 
-            var mesh = new Mesh { name = "MoveMarkerQuad" };
-            mesh.vertices = new[]
-            {
-                new Vector3(-0.5f, 0f, -0.5f),
-                new Vector3( 0.5f, 0f, -0.5f),
-                new Vector3( 0.5f, 0f,  0.5f),
-                new Vector3(-0.5f, 0f,  0.5f),
-            };
-            mesh.uv = new[]
-            {
-                new Vector2(0f, 0f), new Vector2(1f, 0f),
-                new Vector2(1f, 1f), new Vector2(0f, 1f),
-            };
-            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
-            mesh.RecalculateBounds();
-            mf.sharedMesh = mesh;
+            private readonly Transform _tr;
+            private readonly Renderer _rend;
+            private MaterialPropertyBlock _mpb;
+            private readonly float _size, _intro, _fade, _startMul, _endMul;
+            private readonly Color _base, _outline;
+            private St _st = St.Idle;
+            private float _t;
 
-            var sh = Shader.Find("BossRaid/Telegraph");
-            if (sh == null) sh = Shader.Find("Sprites/Default");
-            var mat = new Material(sh);
-            if (sh != null && sh.name == "BossRaid/Telegraph")
+            public bool InUse => _st != St.Idle;
+
+            public Ping(Transform parent, float size, Color baseCol, Color outlineCol,
+                        float intro, float fade, float startMul, float endMul)
             {
-                mat.SetInt("_ShapeType", 0);   // circle
-                mat.SetFloat("_Fill", 0f);      // 내부 미충전 → 링(테두리)만 강조
-                mat.SetFloat("_Progress", 1f);
-                mat.SetFloat("_Pulse", 0f);
-                mat.SetFloat("_OutlineWidth", 0.14f);
-                mat.SetFloat("_UnfilledAlpha", 0.12f);
-                mat.SetColor("_Color", baseColor);
-                mat.SetColor("_OutlineColor", outlineColor);
+                _size = size; _base = baseCol; _outline = outlineCol;
+                _intro = intro; _fade = fade; _startMul = startMul; _endMul = endMul;
+                var go = BuildQuad(parent, baseCol, outlineCol, out _rend);
+                _tr = go.transform;
+                go.SetActive(false);
             }
-            else
+
+            /// <summary>등장: 정착 애니메이션 시작 후 도착/취소/새 클릭 전까지 상시 유지(Hold).</summary>
+            public void Begin(Vector3 pos)
             {
-                mat.color = baseColor;
+                _tr.position = pos;
+                _st = St.Intro; _t = 0f;
+                _tr.gameObject.SetActive(true);
+                Apply(_startMul, 1f);
             }
-            mr.sharedMaterial = mat;
-            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            mr.receiveShadows = false;
-            _renderer = mr;
+
+            public void SetPosition(Vector3 pos)
+            {
+                if (_st != St.Idle) _tr.position = pos;
+            }
+
+            public void BeginFade()
+            {
+                if (_st == St.Idle || _st == St.Fade) return;
+                _st = St.Fade; _t = 0f;
+            }
+
+            public void HideImmediate()
+            {
+                _st = St.Idle;
+                if (_tr != null) _tr.gameObject.SetActive(false);
+            }
+
+            public void Tick(float dt)
+            {
+                switch (_st)
+                {
+                    case St.Intro:
+                        _t += dt;
+                        float ki = _intro > 0f ? Mathf.Clamp01(_t / _intro) : 1f;
+                        Apply(Mathf.Lerp(_startMul, 1f, ki), 1f);
+                        if (ki >= 1f) _st = St.Hold;
+                        break;
+                    case St.Hold:
+                        Apply(1f, 1f);   // 상시 유지
+                        break;
+                    case St.Fade:
+                        _t += dt;
+                        float kf = _fade > 0f ? Mathf.Clamp01(_t / _fade) : 1f;
+                        Apply(Mathf.Lerp(1f, _endMul, kf), 1f - kf);   // 알파↓ + 살짝 스케일 축소
+                        if (kf >= 1f) HideImmediate();
+                        break;
+                }
+            }
+
+            private void Apply(float scaleMul, float alpha)
+            {
+                float s = _size * scaleMul;
+                _tr.localScale = new Vector3(s, s, s);
+                if (_rend == null) return;
+                if (_mpb == null) _mpb = new MaterialPropertyBlock();
+                _rend.GetPropertyBlock(_mpb);
+                var c = _base; c.a = _base.a * alpha;
+                var o = _outline; o.a = _outline.a * alpha;
+                _mpb.SetColor("_Color", c);
+                _mpb.SetColor("_OutlineColor", o);
+                _rend.SetPropertyBlock(_mpb);
+            }
+
+            /// <summary>바닥에 눕힌 1x1 링 Quad(BossRaid/Telegraph circle, _Fill=0 → 링). 미포함 시 Sprites/Default 폴백.</summary>
+            private static GameObject BuildQuad(Transform parent, Color baseCol, Color outlineCol, out Renderer rend)
+            {
+                var go = new GameObject("MoveMarkerPing");
+                go.transform.SetParent(parent, false);
+
+                var mf = go.AddComponent<MeshFilter>();
+                var mr = go.AddComponent<MeshRenderer>();
+
+                var mesh = new Mesh { name = "MoveMarkerQuad" };
+                mesh.vertices = new[]
+                {
+                    new Vector3(-0.5f, 0f, -0.5f),
+                    new Vector3( 0.5f, 0f, -0.5f),
+                    new Vector3( 0.5f, 0f,  0.5f),
+                    new Vector3(-0.5f, 0f,  0.5f),
+                };
+                mesh.uv = new[]
+                {
+                    new Vector2(0f, 0f), new Vector2(1f, 0f),
+                    new Vector2(1f, 1f), new Vector2(0f, 1f),
+                };
+                mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+                mesh.RecalculateBounds();
+                mf.sharedMesh = mesh;
+
+                var sh = Shader.Find("BossRaid/Telegraph");
+                if (sh == null) sh = Shader.Find("Sprites/Default");
+                var mat = new Material(sh);
+                if (sh != null && sh.name == "BossRaid/Telegraph")
+                {
+                    mat.SetInt("_ShapeType", 0);   // circle
+                    mat.SetFloat("_Fill", 0f);      // 내부 미충전 → 링(테두리)만 강조
+                    mat.SetFloat("_Progress", 1f);
+                    mat.SetFloat("_Pulse", 0f);
+                    mat.SetFloat("_OutlineWidth", 0.14f);
+                    mat.SetFloat("_UnfilledAlpha", 0.12f);
+                    mat.SetColor("_Color", baseCol);
+                    mat.SetColor("_OutlineColor", outlineCol);
+                }
+                else
+                {
+                    mat.color = baseCol;
+                }
+                mr.sharedMaterial = mat;
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+                rend = mr;
+                return go;
+            }
         }
     }
 }

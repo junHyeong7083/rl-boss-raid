@@ -45,6 +45,14 @@ namespace BossRaid
         public Color guideColor = new Color(0.25f, 1.6f, 0.6f, 0.9f);   // HDR 초록(발광)
         public Color lineColor = new Color(0.35f, 1.0f, 0.5f, 0.85f);
 
+        [Header("전멸기(혈월 강림) 파훼 가이드")]
+        [Tooltip("붉은 경고 링 베이스 컬러(폭발 예정 기둥).")]
+        public Color doomedColor = new Color(1.9f, 0.12f, 0.10f, 0.9f);   // HDR 진홍(보스 위험 톤)
+        [Tooltip("경고 링 반경(sim). 실제 스케일 = 반경×2×cellSize.")]
+        public float doomedRingRadiusSim = 1.6f;
+        [Tooltip("폭발까지 이 턴 이하이면 빠른 펄스로 경고.")]
+        public int doomedPulseTurns = 3;
+
         private GameObject _marker;
         private LineRenderer _line;
         private bool _subscribed;
@@ -55,6 +63,16 @@ namespace BossRaid
         private Vector3 _targetWorld;       // 안전 지점(월드)
         private Vector3 _dealerWorld;       // 딜러 위치(월드)
         private float _sinceDesireChange;
+
+        // 전멸기 상태 (활성 중엔 히스테리시스/샘플링을 우회하고 서버 안전 원을 상시 표시)
+        private bool _sealActive;           // 이번 스냅샷이 전멸기 파훼 중인가
+        private float _sealSafeRSim;        // 서버 안전 원 반경(sim)
+        private bool _hasDealer;            // 딜러 위치 확보 여부(방향선 표시용)
+
+        // 붉은 경고 링 재사용 풀 (폭발 예정 기둥)
+        private class DoomedRing { public GameObject go; public Material mat; public Renderer rend; public int inTurns; }
+        private readonly List<DoomedRing> _doomedRings = new List<DoomedRing>();
+        private MaterialPropertyBlock _doomedMpb;
 
         private void Start()
         {
@@ -147,11 +165,127 @@ namespace BossRaid
             go.SetActive(false);
         }
 
+        // ─────────────── 붉은 경고 링 (폭발 예정 기둥) — 재사용 풀 ───────────────
+
+        /// <summary>doomed 목록에 맞춰 링을 배치/활성화. null/빈 목록이면 전부 숨김.</summary>
+        private void SyncDoomedRings(DoomedPillar[] doomed)
+        {
+            int n = doomed != null ? doomed.Length : 0;
+            for (int i = 0; i < n; i++)
+            {
+                var ring = GetDoomedRing(i);
+                Vector3 w = viewer.ContinuousToWorld(doomed[i].x, doomed[i].y) + Vector3.up * 0.05f;
+                float cell = viewer != null ? viewer.cellSize : 1f;
+                float d = doomedRingRadiusSim * 2f * cell;
+                ring.go.transform.position = w;
+                ring.go.transform.rotation = Quaternion.identity;
+                ring.go.transform.localScale = new Vector3(d, d, d);
+                ring.inTurns = doomed[i].in_turns;
+                if (!ring.go.activeSelf) ring.go.SetActive(true);
+            }
+            // 남는 링 숨김
+            for (int i = n; i < _doomedRings.Count; i++)
+                if (_doomedRings[i].go.activeSelf) _doomedRings[i].go.SetActive(false);
+        }
+
+        private DoomedRing GetDoomedRing(int i)
+        {
+            while (_doomedRings.Count <= i) _doomedRings.Add(BuildDoomedRing());
+            return _doomedRings[i];
+        }
+
+        /// <summary>활성 경고 링의 알파 펄스 갱신(폭발 임박=빠르게).</summary>
+        private void UpdateDoomedRingPulse()
+        {
+            if (_doomedRings.Count == 0) return;
+            if (_doomedMpb == null) _doomedMpb = new MaterialPropertyBlock();
+            float t = Time.unscaledTime;
+            foreach (var ring in _doomedRings)
+            {
+                if (ring.go == null || !ring.go.activeSelf) continue;
+                bool imminent = ring.inTurns <= doomedPulseTurns;
+                float speed = imminent ? 9f : 3f;
+                float lo = imminent ? 0.35f : 0.6f;
+                float pulse = 0.5f + 0.5f * Mathf.Sin(t * speed);
+                float a = Mathf.Lerp(lo, 1f, pulse);
+                ring.rend.GetPropertyBlock(_doomedMpb);
+                var c = doomedColor; c.a = doomedColor.a * a;
+                _doomedMpb.SetColor("_Color", c);
+                _doomedMpb.SetColor("_OutlineColor", c);
+                ring.rend.SetPropertyBlock(_doomedMpb);
+            }
+        }
+
+        /// <summary>바닥에 눕힌 링 Quad(Telegraph 셰이더 circle, _Fill=0 → 테두리 링). 미포함 시 Sprites/Default 폴백.</summary>
+        private DoomedRing BuildDoomedRing()
+        {
+            var go = new GameObject("DoomedWarnRing");
+            go.transform.SetParent(transform, false);
+
+            var mf = go.AddComponent<MeshFilter>();
+            var mr = go.AddComponent<MeshRenderer>();
+
+            var mesh = new Mesh { name = "DoomedRingQuad" };
+            mesh.vertices = new[]
+            {
+                new Vector3(-0.5f, 0f, -0.5f), new Vector3(0.5f, 0f, -0.5f),
+                new Vector3( 0.5f, 0f,  0.5f), new Vector3(-0.5f, 0f,  0.5f),
+            };
+            mesh.uv = new[]
+            {
+                new Vector2(0f, 0f), new Vector2(1f, 0f),
+                new Vector2(1f, 1f), new Vector2(0f, 1f),
+            };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+            mf.sharedMesh = mesh;
+
+            var sh = Shader.Find("BossRaid/Telegraph");
+            if (sh == null) sh = Shader.Find("Sprites/Default");
+            var mat = new Material(sh);
+            if (sh != null && sh.name == "BossRaid/Telegraph")
+            {
+                mat.SetInt("_ShapeType", 0);   // circle
+                mat.SetFloat("_Fill", 0f);      // 링(테두리만)
+                mat.SetFloat("_Progress", 1f);
+                mat.SetFloat("_Pulse", 0f);     // 펄스는 MPB 알파로 직접 구동
+                mat.SetFloat("_OutlineWidth", 0.16f);
+                mat.SetFloat("_UnfilledAlpha", 0.12f);
+                mat.SetColor("_Color", doomedColor);
+                mat.SetColor("_OutlineColor", doomedColor);
+            }
+            else
+            {
+                mat.color = doomedColor;
+            }
+            mat.renderQueue = 3100;
+            mr.sharedMaterial = mat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+            go.SetActive(false);
+            return new DoomedRing { go = go, mat = mat, rend = mr, inTurns = 99 };
+        }
+
         // ─────────────── 스냅샷 → 안전점 계산 ───────────────
 
         private void HandleSnapshot(BossSnapshot snap)
         {
-            if (viewer == null || snap == null) { _desired = false; return; }
+            if (viewer == null || snap == null) { _desired = false; _sealActive = false; SyncDoomedRings(null); return; }
+
+            // 전멸기(혈월 강림) 파훼 중이면 서버 안전 원 + 붉은 경고 링을 상시 표시(steps 로직 우회).
+            var seal = snap.boss != null ? snap.boss.seal : null;
+            if (seal != null && seal.active == 1)
+            {
+                _sealActive = true;
+                _targetWorld = viewer.ContinuousToWorld(seal.safe_x, seal.safe_y) + Vector3.up * 0.04f;
+                _sealSafeRSim = seal.safe_r;
+                _hasDealer = TryGetDealer(snap, out float ddx, out float ddy);
+                if (_hasDealer) _dealerWorld = viewer.ContinuousToWorld(ddx, ddy) + Vector3.up * 0.04f;
+                _desired = true;
+                SyncDoomedRings(seal.doomed);
+                return;
+            }
+            if (_sealActive) { _sealActive = false; SyncDoomedRings(null); }
 
             // 위험 도형 수집
             var shapes = new List<ShapeData>();
@@ -311,6 +445,37 @@ namespace BossRaid
         private void Update()
         {
             float dt = Time.unscaledDeltaTime;
+
+            // 붉은 경고 링 펄스(폭발 임박 시 빠르게) — 활성 링만.
+            UpdateDoomedRingPulse();
+
+            // 전멸기 파훼 중: 히스테리시스/샘플링 우회, 서버 안전 원을 즉시·상시 표시.
+            if (_sealActive)
+            {
+                _visible = true;
+                _sinceDesireChange = 0f;
+                float cellS = viewer != null ? viewer.cellSize : 1f;
+                if (_marker != null)
+                {
+                    if (!_marker.activeSelf) _marker.SetActive(true);
+                    float dSeal = _sealSafeRSim * 2f * cellS;   // 마커 스케일 = safeR*2*cellSize
+                    _marker.transform.position = _targetWorld;
+                    _marker.transform.rotation = Quaternion.identity;
+                    _marker.transform.localScale = new Vector3(dSeal, dSeal, dSeal);
+                }
+                // 방향선: 플레이어 → 안전 원(항상 유지 — 안전해도 계속).
+                if (_line != null && _hasDealer)
+                {
+                    if (!_line.gameObject.activeSelf) _line.gameObject.SetActive(true);
+                    _line.SetPosition(0, _dealerWorld);
+                    _line.SetPosition(1, _targetWorld);
+                }
+                else if (_line != null && _line.gameObject.activeSelf)
+                {
+                    _line.gameObject.SetActive(false);
+                }
+                return;
+            }
 
             // 원하는 표시 상태가 현재와 다르면 hysteresis 시간 경과 후 전환
             if (_desired != _visible)
