@@ -110,15 +110,16 @@ ROLE_STATS: Dict[PartyRole, RoleStats] = {
 @dataclass
 class RaidConfig:
     # ── 맵 (연속 공간) ──
-    map_width: float = 20.0
-    map_height: float = 20.0
+    # 플레이테스트 피드백(2026-08): 이동 가능 영역(붉은 원)이 체감상 좁아 맵/아레나 25% 확대.
+    map_width: float = 25.0
+    map_height: float = 25.0
 
     # ── 원형 아레나 (HP 연동 축소) ──
     # 이동/대시/보스 이동 클램프는 사각 경계가 아니라 이 원(중심 arena_center, 반경 = 유효반경 - u.radius).
     # 유효 반경은 보스 HP 구간에 따라 티어별로 축소(티어 변경 시 2턴에 걸쳐 선형). 전멸기 중엔 보류.
     # HP 100~75 / 75~50 / 50~25 / 25~0% → arena_radius_tiers[0..3].
-    arena_center: Tuple[float, float] = (10.0, 10.0)
-    arena_radius_tiers: Tuple[float, float, float, float] = (9.6, 8.8, 8.2, 7.6)
+    arena_center: Tuple[float, float] = (12.5, 12.5)
+    arena_radius_tiers: Tuple[float, float, float, float] = (12.0, 11.0, 10.2, 9.5)
     arena_shrink_turns: int = 2               # 티어 변경 시 축소에 걸리는 턴수(선형)
     pillar_inner_margin: float = 2.0          # 기둥이 (유효반경 - 이 값) 밖이면 중심 쪽으로 비율 이동
 
@@ -169,7 +170,7 @@ class RaidConfig:
     # ── 기둥(Pillar) 오브젝트 ──
     # 폭주 돌진 유도(그로기) + 전멸기 LOS 은신에 공용. 고정 4개.
     pillar_positions: List[Tuple[float, float]] = field(default_factory=lambda: [
-        (5.0, 5.0), (15.0, 5.0), (5.0, 15.0), (15.0, 15.0),
+        (6.25, 6.25), (18.75, 6.25), (6.25, 18.75), (18.75, 18.75),
     ])
     pillar_radius: float = 1.2
     pillar_respawn_turns: int = 20            # 돌진에 파괴된 기둥 재생성 쿨다운
@@ -217,8 +218,10 @@ class RaidConfig:
         int(RaidActionID.ULTIMATE): 200,     # 딜러 R 궁극 '혈월 처형' (200턴=60.0s)
         int(RaidActionID.PARRY): 10,         # 딜러 G 패링 (10턴=3.0s)
         int(RaidActionID.TAUNT): 6,          # (6턴=1.8s)
-        int(RaidActionID.GUARD): 4,          # (4턴=1.2s)
-        int(RaidActionID.HEAL): 4,           # (4턴=1.2s)
+        # 플레이테스트 피드백(2026-08): 힐/가드 쿨이 너무 잘 돌아 파티가 사실상 불사였음
+        # → 회복 스루풋 1/3, 가드 상시 유지 불가로 조정(죽음의 압박 복원).
+        int(RaidActionID.GUARD): 8,          # (8턴=2.4s)
+        int(RaidActionID.HEAL): 12,          # (12턴=3.6s)
         int(RaidActionID.CLEANSE): 8,        # (8턴=2.4s)
         int(RaidActionID.BUFF_ATK): 8,       # (8턴=2.4s)
         int(RaidActionID.BUFF_SHIELD): 6,    # (6턴=1.8s)
@@ -352,7 +355,14 @@ class RaidConfig:
 
     # ── 전멸기 '혈월 강림' (LOS 은신) ──
     # ~10초: Unity 시네마틱 인트로 3.6초 + 실제 파훼 이동 ~6.4초 (준비시간 확보).
-    seal_wind_up_turns: int = 30
+    seal_wind_up_turns: int = 30              # (레거시 — 웨이브제 개편 후 미사용, 호환 유지)
+    # 웨이브제 개편(2026-08): 시계방향 순차 파괴 + LOS 은신은 최종 생존 석상이 고정이라
+    # "처음부터 그 석상에 서 있으면 끝"이 정답으로 굳는 문제 →
+    # 남은 석상 중 하나가 무작위로 빛나고, 유예 안에 그 안전 원에 진입하지 못한 채
+    # 폭발을 맞으면 즉사. 빛난 석상은 소모되고 다음 웨이브가 반복된다(4→3→2).
+    seal_waves: int = 3                       # 웨이브 수
+    seal_wave_turns: int = 22                 # 웨이브당 유예 (22턴=6.6s — 반대편 석상까지 이동 여유)
+    seal_safe_extra_r: float = 1.6            # 안전 원 반경 = 석상 반경 + 이 값
     seal_grog_turns: int = 8                  # 성공 시 딜타임 (파훼 보상 확대)
     # 판정: 유닛-보스 선분이 살아있는 기둥 원과 교차하면 "은신 성공"
     # ── 파훼 가이드 (안전지대) ──

@@ -138,40 +138,23 @@ class FSMNpcPolicy:
         return None
 
     def _seal_hide(self, u) -> Optional[int]:
+        """웨이브제 전멸기 대응: 현재 '빛나는 석상'의 안전 원으로 진입 후 대기.
+        각자 자기 방향에서 석상 둘레 링으로 접근 → 한 지점에 몰려 서로 밀치는 것 방지."""
         env = self.env
-        b = env.boss
-        # 순차 기둥 폭발 대응: 파티 전원이 "끝까지 살아남는 기둥"(시계방향 파괴 순서의 꼬리)로
-        # 합류하도록 공용 목표를 잡는다. env._seal_explode_next_pillar 은 각도 내림차순 첫 생존자를
-        # 파괴하므로, 내림차순 정렬의 뒤에서부터 첫 생존 기둥이 최종 생존자.
-        pillars = [p for p in env.pillars if p.alive]
-        if not pillars:
+        ap = env.boss.active_pattern
+        lit = env._seal_lit_pillar(ap) if (ap is not None and ap.mode == "seal") else None
+        if lit is None:
             return int(RaidActionID.STAY)
-        cx, cy = env.config.arena_center
-        order = sorted(env.pillars, key=lambda q: math.atan2(q.y - cy, q.x - cx), reverse=True)
-        survivor = next((q for q in reversed(order) if q.alive), pillars[0])
-        # 이미 최종 생존 기둥 뒤에 은신 중이면 유지
-        if env._unit_hidden(u) and _euclid(u.x, u.y, survivor.x, survivor.y) <= survivor.radius + 1.6:
+        p = lit
+        safe_r = p.radius + env.config.seal_safe_extra_r
+        d = _euclid(u.x, u.y, p.x, p.y)
+        # 이미 안전 원 안(경계 여유 0.2 안쪽)이면 대기
+        if d <= safe_r - 0.2:
             return int(RaidActionID.STAY)
-        p = survivor
-        dirx = p.x - b.x; diry = p.y - b.y
-        d = math.hypot(dirx, diry) or 1.0
-        tx = p.x + dirx / d * (p.radius + 0.5)
-        ty = p.y + diry / d * (p.radius + 0.5)
-
-        # 기둥에 이미 붙어 있으면(직선 접근이 기둥 몸통에 막힘) 둘레를 따라 접선 우회:
-        # 현재 각도에서 목표 각도(보스 반대편) 쪽으로 호를 그리며 돈다. 반경은 충돌
-        # 한계(u.radius + p.radius)보다 여유 있게 잡아 슬라이딩 없이도 진행 가능.
-        dist_p = _euclid(u.x, u.y, p.x, p.y)
-        # 우회 발동 반경: 한 스텝(1.0) 전진이 기둥 충돌권에 걸릴 수 있는 거리까지 넉넉히.
-        if dist_p <= p.radius + u.radius + 1.15:
-            ang_u = math.atan2(u.y - p.y, u.x - p.x)
-            ang_t = math.atan2(diry, dirx)                    # 은신 지점 방향(보스 반대편)
-            diff = (ang_t - ang_u + math.pi) % (2 * math.pi) - math.pi
-            if abs(diff) > 0.15:                              # 아직 반대편이 아님 → 호 이동
-                step = 0.6 if diff > 0 else -0.6
-                orbit_r = p.radius + u.radius + 0.45
-                tx = p.x + math.cos(ang_u + step) * orbit_r
-                ty = p.y + math.sin(ang_u + step) * orbit_r
+        ang = math.atan2(u.y - p.y, u.x - p.x) if d > 1e-6 else 0.0
+        ring = p.radius + u.radius + 0.35     # 석상 몸통에 밀착한 표준 링(안전 원 깊숙이)
+        tx = p.x + math.cos(ang) * ring
+        ty = p.y + math.sin(ang) * ring
         return self._move_toward_avoiding(u, tx, ty)
 
     def _counter_action(self, u) -> int:

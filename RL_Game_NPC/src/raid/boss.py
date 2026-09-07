@@ -269,11 +269,12 @@ class Boss:
     def start_seal(self, ctx: Dict):
         """전멸기 '혈월 강림' — LOS 은신. 페이즈 전환 시 강제."""
         facing = self.facing
+        total = self.config.seal_waves * self.config.seal_wave_turns
         ap = ActivePattern(
             pattern_id=PatternID.SEAL_WIPE, mode="seal",
             origin=(self.x, self.y), facing=facing,
-            turns_remaining=self.config.seal_wind_up_turns,
-            total_this_step=self.config.seal_wind_up_turns,
+            turns_remaining=total,
+            total_this_step=total,
             extra={"anim": "blood_moon", "hold": 0},
         )
         self.active_pattern = ap

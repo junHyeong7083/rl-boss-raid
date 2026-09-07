@@ -224,7 +224,7 @@ class RaidEnv:
                     self.step_events[uid].append({
                         "type": "cinematic_start",
                         "pattern": int(PatternID.SEAL_WIPE),
-                        "duration_turns": cfg.seal_wind_up_turns,
+                        "duration_turns": cfg.seal_waves * cfg.seal_wave_turns,
                     })
 
         # 2. 파티 행동 (가드 버프/카운터 시도/딜 먼저 처리)
@@ -1160,116 +1160,95 @@ class RaidEnv:
             self.boss.stagger_active = False
             self.boss.active_pattern = None
 
-    # ── 전멸기 '혈월 강림' (LOS 은신) ──
+    # ── 전멸기 '혈월 강림' (무작위 안전 석상 웨이브) ──
+    # 개편(2026-08): 기존 시계방향 순차 파괴 + LOS 은신은 최종 생존 석상이 결정론적이라
+    # "처음부터 그 석상 뒤에 서 있으면 끝"이 고정 정답이 되는 문제가 있었다.
+    # 새 규칙: 남은 석상 중 하나가 무작위로 빛남 → seal_wave_turns 유예 안에 그 석상의
+    # 안전 원 진입 → 폭발 시 원 밖 생존자는 즉사, 빛난 석상은 소모 → 다음 웨이브(4→3→2).
+
+    def _seal_lit_pillar(self, ap: ActivePattern):
+        idx = ap.extra.get("lit_idx", -1)
+        if 0 <= idx < len(self.pillars):
+            return self.pillars[idx]
+        return None
+
+    def _seal_next_wave(self, ap: ActivePattern) -> bool:
+        """남은 석상 중 하나를 무작위 선택해 다음 웨이브 시작. 후보가 없으면 False."""
+        alive = [i for i, p in enumerate(self.pillars) if p.alive]
+        if not alive:
+            return False
+        ap.extra["wave"] = ap.extra.get("wave", 0) + 1
+        ap.extra["lit_idx"] = self.rng.choice(alive)
+        ap.extra["wave_left"] = self.config.seal_wave_turns
+        lit = self.pillars[ap.extra["lit_idx"]]
+        for uid in self.units:
+            self.step_events[uid].append({"type": "seal_wave",
+                                          "wave": int(ap.extra["wave"]),
+                                          "x": float(lit.x), "y": float(lit.y),
+                                          "turns": int(self.config.seal_wave_turns)})
+        return True
+
     def _unit_hidden(self, u: PartyUnit) -> bool:
-        """유닛-보스 선분이 살아있는 기둥과 교차하면 은신.
-        기둥 반경을 seal_los_margin 만큼 확대해 그림자 원뿔을 넓힌다(파훼 관대화)."""
-        margin = self.config.seal_los_margin
-        for p in self.pillars:
-            if not p.alive:
-                continue
-            if segment_intersects_circle((u.x, u.y), (self.boss.x, self.boss.y),
-                                         (p.x, p.y), p.radius + margin):
-                return True
-        return False
-
-    def _seal_sweep_order(self) -> List[Pillar]:
-        """전멸기 순차 폭발 순서 (중심 기준 atan2 내림차순 = 시계방향).
-        _seal_explode_next_pillar / _seal_forecast 가 공유하는 단일 정렬 소스."""
-        cx, cy = self.config.arena_center
-        return sorted(self.pillars, key=lambda p: math.atan2(p.y - cy, p.x - cx), reverse=True)
-
-    def _seal_forecast(self, ap: ActivePattern):
-        """남은 순차 폭발 스케줄(doomed)과 최종 생존 기둥을 시뮬레이션.
-        _tick_seal(경과 8/15/22턴에 _seal_explode_next_pillar) 와 동일 정렬·규칙을 사용해
-        스냅샷과 실제 폭발이 항상 일치하도록 한다.
-        반환: (doomed, surv)
-          doomed: [{"x","y","in"}] — 앞으로 폭발할 기둥과 폭발까지 남은 턴(in).
-          surv:   최종까지 살아남는 기둥(안전 원 기준). 없으면 None."""
-        order = self._seal_sweep_order()
-        alive = {id(p): p.alive for p in self.pillars}
-        done = ap.extra.get("explode_done", set())
-        elapsed = ap.total_this_step - ap.turns_remaining
-        doomed = []
-        for th in (8, 15, 22):
-            if th in done:
-                continue
-            if sum(1 for p in self.pillars if alive[id(p)]) <= 1:
-                continue   # 최소 1개 생존 보장 (tick 과 동일)
-            for p in order:
-                if alive[id(p)]:
-                    alive[id(p)] = False
-                    doomed.append({"x": float(p.x), "y": float(p.y),
-                                   "in": int(th - elapsed)})
-                    break
-        survivors = [p for p in order if alive[id(p)]]
-        surv = survivors[-1] if survivors else (order[-1] if order else None)
-        return doomed, surv
+        """개편 후 '은신' = 현재 빛나는 석상의 안전 원 안."""
+        ap = self.boss.active_pattern
+        if ap is None or ap.mode != "seal":
+            return False
+        lit = self._seal_lit_pillar(ap)
+        if lit is None:
+            return False
+        return math.hypot(u.x - lit.x, u.y - lit.y) <= lit.radius + self.config.seal_safe_extra_r
 
     def _seal_safe_circle(self, ap: ActivePattern):
-        """생존 기둥 뒤(보스 반대편)의 초록 안전 원. 반환 (safe_x, safe_y, safe_r, doomed).
-        중심 = 생존기둥 중심 + normalize(기둥-보스) * (기둥반경 + safe_r).
-        '원 안 = 무조건 은신 성공' 불변식(test_seal_guide 9점 검증)."""
-        doomed, surv = self._seal_forecast(ap)
-        if surv is None:
+        """현재 빛나는 석상 중심의 안전 원. 반환 (safe_x, safe_y, safe_r, doomed).
+        '원 안 = 무조건 생존' 불변식 유지(_unit_hidden 과 동일 판정).
+        웨이브제에서는 위험 스케줄(doomed) 개념이 없어 빈 리스트를 보낸다."""
+        lit = self._seal_lit_pillar(ap)
+        if lit is None:
             return None
-        safe_r = self.config.seal_safe_circle_r
-        dx = surv.x - self.boss.x
-        dy = surv.y - self.boss.y
-        d = math.hypot(dx, dy)
-        if d < 1e-9:
-            nx, ny = 1.0, 0.0
-        else:
-            nx, ny = dx / d, dy / d
-        sx = surv.x + nx * (surv.radius + safe_r)
-        sy = surv.y + ny * (surv.radius + safe_r)
-        return (float(sx), float(sy), float(safe_r), doomed)
-
-    def _seal_explode_next_pillar(self, ap: ActivePattern):
-        """전멸기 진행 중 기둥 1개 시계방향 파괴 (중심 기준 각도 정렬). 최소 1개 생존 보장."""
-        alive = [p for p in self.pillars if p.alive]
-        if len(alive) <= 1:
-            return   # 최소 1개는 항상 생존
-        # 시계방향 = 각도 내림차순. 살아있는 것 중 다음(첫 생존자)을 파괴하면 자연 스윕.
-        for p in self._seal_sweep_order():
-            if p.alive:
-                p.alive = False
-                p.respawn_timer = self.config.pillar_respawn_turns
-                for uid in self.units:
-                    self.step_events[uid].append({"type": "pillar_explode",
-                                                  "x": float(p.x), "y": float(p.y)})
-                break
+        return (float(lit.x), float(lit.y),
+                float(lit.radius + self.config.seal_safe_extra_r), [])
 
     def _tick_seal(self, ap: ActivePattern):
-        # 순차 기둥 폭발: 경과 8/15/22턴 시점에 1개씩 시계방향 파괴 (최소 1개 생존).
-        done = ap.extra.setdefault("explode_done", set())
-        elapsed = ap.total_this_step - ap.turns_remaining
-        for th in (8, 15, 22):
-            if th not in done and elapsed >= th:
-                done.add(th)
-                self._seal_explode_next_pillar(ap)
+        cfg = self.config
+        if "lit_idx" not in ap.extra:
+            if not self._seal_next_wave(ap):
+                self.boss.active_pattern = None
+                return
+        lit = self._seal_lit_pillar(ap)
         hidden_flags = {u.uid: (u.alive and self._unit_hidden(u)) for u in self.units.values()}
-        # 판정은 "생존자 전원 은신" — 이미 죽은 파티원이 기믹을 자동 실패시키지 않게.
-        all_hidden = all(hidden_flags[u.uid] for u in self.units.values() if u.alive)
         for uid in self.units:
             self.step_events[uid].append({"type": "seal_holding",
                                           "hidden": bool(hidden_flags.get(uid, False)),
-                                          "turns_left": ap.turns_remaining})
+                                          "turns_left": int(ap.extra["wave_left"])})
+        ap.extra["wave_left"] -= 1
         ap.turns_remaining -= 1
-        if ap.turns_remaining <= 0:
-            if all_hidden:
-                self.boss.grog_turns = max(self.boss.grog_turns, self.config.seal_grog_turns)
+        if ap.extra["wave_left"] > 0:
+            return
+
+        # 웨이브 폭발: 안전 원 밖 생존자 즉사(개별 판정 — 전원 연대 실패 아님), 빛난 석상 소모.
+        for u in self.units.values():
+            if u.alive and not hidden_flags[u.uid]:
+                u.hp = 0
+                u.alive = False
+                self.step_events[u.uid].append({"type": "death"})
+                self.step_events[u.uid].append({"type": "seal_fail"})
+        lit.alive = False
+        lit.respawn_timer = cfg.pillar_respawn_turns
+        for uid in self.units:
+            self.step_events[uid].append({"type": "pillar_explode",
+                                          "x": float(lit.x), "y": float(lit.y)})
+
+        party_alive = any(u.alive for u in self.units.values())
+        done = ap.extra["wave"] >= cfg.seal_waves
+        if done or not party_alive or not self._seal_next_wave(ap):
+            if party_alive:
+                self.boss.grog_turns = max(self.boss.grog_turns, cfg.seal_grog_turns)
                 for uid in self.units:
                     self.step_events[uid].append({"type": "seal_success"})
                     self.step_events[uid].append({"type": "cinematic_end", "success": True})
             else:
-                for u in self.units.values():
-                    if u.alive:
-                        u.hp = 0
-                        u.alive = False
-                        self.step_events[u.uid].append({"type": "death"})
-                    self.step_events[u.uid].append({"type": "seal_fail"})
-                    self.step_events[u.uid].append({"type": "cinematic_end", "success": False})
+                for uid in self.units:
+                    self.step_events[uid].append({"type": "cinematic_end", "success": False})
             self.boss.active_pattern = None
 
     def _deal_damage_to_unit(self, u: PartyUnit, amount: int):
@@ -1313,7 +1292,7 @@ class RaidEnv:
         for uid in self.units:
             self.step_events.setdefault(uid, []).append({
                 "type": "cinematic_start", "pattern": int(PatternID.SEAL_WIPE),
-                "duration_turns": self.config.seal_wind_up_turns})
+                "duration_turns": self.config.seal_waves * self.config.seal_wave_turns})
 
     # ────────────── 관찰 ──────────────
     def _get_all_observations(self) -> Dict[str, np.ndarray]:
@@ -1511,7 +1490,7 @@ class RaidEnv:
                 safe_x, safe_y, safe_r, doomed = sc
                 boss_dict["seal"] = {
                     "active": 1,
-                    "turns_left": int(ap.turns_remaining),
+                    "turns_left": int(ap.extra.get("wave_left", ap.turns_remaining)),
                     "safe_x": safe_x, "safe_y": safe_y, "safe_r": safe_r,
                     "doomed": doomed,
                 }

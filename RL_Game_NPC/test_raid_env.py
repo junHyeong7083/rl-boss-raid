@@ -312,127 +312,148 @@ def _behind_pillar_pos(env, pillar):
             pillar.y + dy / d * (pillar.radius + 0.4))
 
 
-def _seal_survivor(env):
-    """시계방향 파괴 순서(각도 내림차순)의 꼬리 = 최종 생존 기둥."""
-    cx, cy = env.config.arena_center
-    order = sorted(env.pillars, key=lambda q: math.atan2(q.y - cy, q.x - cx), reverse=True)
-    return order[-1]
+def _seal_lit(env):
+    """현재 웨이브의 '빛나는 석상'(안전 석상)."""
+    ap = env.boss.active_pattern
+    return env._seal_lit_pillar(ap) if ap is not None else None
+
+
+def _seal_total_turns(cfg):
+    return cfg.seal_waves * cfg.seal_wave_turns + 4
 
 
 def test_seal_success():
-    print("\n== 6) 전멸기 LOS 은신 성공 + 순차 기둥 폭발 ==")
+    print("\n== 6) 전멸기 웨이브 성공 (빛나는 석상 추종) ==")
     cfg = RaidConfig()
     env = RaidEnv(cfg, seed=21)
     env.reset(seed=21)
-    env.boss.x, env.boss.y = 10.0, 10.0
-    # 전원 "최종 생존 기둥" 뒤로 모음 (다른 기둥은 폭발해도 무관)
-    surv = _seal_survivor(env)
-    hx, hy = _behind_pillar_pos(env, surv)
-    for i, u in enumerate(env.units.values()):
-        u.x, u.y = hx + 0.1 * i, hy
     env.force_seal()
     cine_start = any(e.get("type") == "cinematic_start" for e in _collect_events(env))
-    success = cine_end = explode_seen = False
-    for _ in range(cfg.seal_wind_up_turns + 2):
+    success = cine_end = False
+    explode_count = 0
+    lit_seq = []
+    for _ in range(_seal_total_turns(cfg)):
+        # 매 턴 현재 빛나는 석상의 안전 원 안으로 전원 텔레포트(추종 시뮬레이션)
+        lit = _seal_lit(env)
+        if lit is not None:
+            if not lit_seq or lit_seq[-1] != (lit.x, lit.y):
+                lit_seq.append((lit.x, lit.y))
+            for i, u in enumerate(env.units.values()):
+                th = i * math.pi / 2
+                r = lit.radius + 0.5
+                u.x, u.y = lit.x + math.cos(th) * r, lit.y + math.sin(th) * r
         env.step(_stay())
         evs = _collect_events(env)
         if any(e.get("type") == "seal_success" for e in evs):
             success = True
         if any(e.get("type") == "cinematic_end" and e.get("success") for e in evs):
             cine_end = True
-        if any(e.get("type") == "pillar_explode" for e in evs):
-            explode_seen = True
+        explode_count += sum(1 for e in env.step_events.get(0, [])
+                             if e.get("type") == "pillar_explode")
         if env.boss.active_pattern is None:
             break
     check(cine_start, "cinematic_start 이벤트")
-    check(explode_seen, "순차 기둥 폭발(pillar_explode) 발생")
+    check(explode_count == cfg.seal_waves, f"웨이브 수만큼 석상 폭발 ({explode_count})")
+    check(len(lit_seq) == cfg.seal_waves, f"웨이브마다 다른 석상이 빛남 ({len(lit_seq)})")
     n_alive = sum(1 for p in env.pillars if p.alive)
-    check(n_alive >= 1, f"최소 1개 기둥 생존 ({n_alive})")
-    check(success, "seal_success (전원 은신)")
+    check(n_alive == 4 - cfg.seal_waves, f"빛난 석상만 소모 (생존 {n_alive})")
+    check(success, "seal_success (전 웨이브 진입 성공)")
     check(cine_end, "cinematic_end success=True")
     check(all(u.alive for u in env.units.values()), "전원 생존")
     check(env.boss.grog_turns > 0, "성공 후 보스 그로기(딜타임)")
 
 
 def test_seal_fail():
-    print("\n== 6b) 전멸기 노출 실패(전멸) ==")
+    print("\n== 6b) 전멸기 미진입 실패(즉사) ==")
     cfg = RaidConfig()
     env = RaidEnv(cfg, seed=22)
     env.reset(seed=22)
-    env.boss.x, env.boss.y = 10.0, 10.0
-    for u in env.units.values():
-        u.x, u.y = 11.0, 10.0
     env.force_seal()
-    cine_end_fail = False
-    for _ in range(cfg.seal_wind_up_turns + 2):
+    cine_end_fail = seal_fail_seen = False
+    for _ in range(_seal_total_turns(cfg)):
+        # 전원 빛나는 석상에서 먼 곳(아레나 중심 근처)에 방치
+        cx, cy = cfg.arena_center
+        lit = _seal_lit(env)
+        for u in env.units.values():
+            if u.alive:
+                # 어느 석상 안전 원에도 안 걸리는 지점: 빛나는 석상 반대 방향 중심부
+                ox = cx - (0.15 * (lit.x - cx) if lit else 0.0)
+                oy = cy - (0.15 * (lit.y - cy) if lit else 0.0)
+                u.x, u.y = ox, oy
         env.step(_stay())
         evs = _collect_events(env)
         if any(e.get("type") == "seal_fail" for e in evs):
-            cine_end_fail = any(e.get("type") == "cinematic_end" and not e.get("success") for e in evs)
+            seal_fail_seen = True
+        if any(e.get("type") == "cinematic_end" and not e.get("success") for e in evs):
+            cine_end_fail = True
         if env.boss.active_pattern is None:
             break
-    check(all(not u.alive for u in env.units.values()), "노출 시 전원 즉사(wipe)")
+    check(seal_fail_seen, "seal_fail (안전 원 밖 즉사)")
+    check(all(not u.alive for u in env.units.values()), "미진입 시 전원 즉사(wipe)")
     check(cine_end_fail, "cinematic_end success=False")
 
 
 def _seal_safe_points(safe_x, safe_y, safe_r):
-    """안전 원의 중심 + 둘레 8점 = 9점."""
+    """안전 원의 중심 + 둘레(반경 99.5%) 8점 = 9점."""
     pts = [(safe_x, safe_y)]
     for k in range(8):
         th = k * math.pi / 4
-        pts.append((safe_x + math.cos(th) * safe_r, safe_y + math.sin(th) * safe_r))
+        pts.append((safe_x + math.cos(th) * safe_r * 0.995,
+                    safe_y + math.sin(th) * safe_r * 0.995))
     return pts
 
 
 def test_seal_guide():
-    print("\n== 6c) 전멸기 파훼 가이드 (안전 원 + doomed 스케줄) ==")
+    print("\n== 6c) 전멸기 파훼 가이드 (빛나는 석상 안전 원) ==")
     cfg = RaidConfig()
     # (d) seal 비활성 시 boss.seal 필드 없음 (하위 호환)
     env = RaidEnv(cfg, seed=31)
     env.reset(seed=31)
     check("seal" not in env.get_snapshot()["boss"], "seal 비활성 시 boss.seal 필드 없음")
-    # 전멸기 강제 발동 (보스 중심 고정)
+    # 전멸기 강제 발동
     env = RaidEnv(cfg, seed=23)
     env.reset(seed=23)
-    env.boss.x, env.boss.y = 10.0, 10.0
     env.force_seal()
+    env.step(_stay())   # 첫 틱에서 웨이브 시작(빛나는 석상 선정)
     seal = env.get_snapshot()["boss"].get("seal")
-    # (a) 스냅샷에 seal 필드 존재 + 스키마
+    # (a) 스냅샷에 seal 필드 존재 + 스키마 (클라이언트 SafeGuideMarker 계약 유지)
     check(seal is not None, "seal 활성 시 boss.seal 존재")
     if seal is None:
         return
     need = {"active", "turns_left", "safe_x", "safe_y", "safe_r", "doomed"}
     check(need.issubset(set(seal.keys())), f"seal 스키마 {sorted(seal.keys())}")
     check(seal.get("active") == 1, "seal.active=1")
-    check(abs(seal.get("safe_r", 0) - cfg.seal_safe_circle_r) < 1e-6, "safe_r = config 값")
-    # (c) doomed 초기 스케줄 (3개 예정, in 오름차순 8/15/22 - elapsed)
-    doomed0 = [(round(dd["x"], 4), round(dd["y"], 4)) for dd in seal["doomed"]]
-    check(len(doomed0) == 3, f"초기 doomed 3개 예정 ({len(doomed0)})")
-    ins = [dd["in"] for dd in seal["doomed"]]
-    check(ins == sorted(ins) and all(v > 0 for v in ins), f"doomed in 오름차순·양수 ({ins})")
-    # 진행하며 (b) 안전 원 9점 은신 판정 + (c) 실제 폭발 순서 수집
-    exploded = []
+    lit = _seal_lit(env)
+    check(lit is not None and abs(seal["safe_x"] - lit.x) < 1e-6
+          and abs(seal["safe_y"] - lit.y) < 1e-6, "안전 원 중심 = 빛나는 석상")
+    check(abs(seal.get("safe_r", 0) - (lit.radius + cfg.seal_safe_extra_r)) < 1e-6,
+          "safe_r = 석상 반경 + seal_safe_extra_r")
+    check(seal.get("turns_left", 0) <= cfg.seal_wave_turns, "turns_left = 웨이브 잔여")
+    # 진행하며 (b) 안전 원 9점 은신 판정 불변식 + (c) 웨이브마다 안전 원이 이동
+    centers = {(round(seal["safe_x"], 3), round(seal["safe_y"], 3))}
     all_hidden_ok = True
-    checked_snaps = 0
-    for _ in range(cfg.seal_wind_up_turns + 2):
+    checked_snaps = 1
+    for _ in range(_seal_total_turns(cfg)):
+        # 파티를 빛나는 석상 안전 원에 유지 — 전 웨이브가 진행되도록(전멸 시 조기 종료)
+        lit_now = _seal_lit(env)
+        if lit_now is not None:
+            for i, u in enumerate(env.units.values()):
+                th = i * math.pi / 2
+                u.x, u.y = (lit_now.x + math.cos(th) * (lit_now.radius + 0.5),
+                            lit_now.y + math.sin(th) * (lit_now.radius + 0.5))
         env.step(_stay())
-        # pillar_explode 는 uid 별로 중복 방출되므로 단일 uid(0) 이벤트만 집계.
-        for e in env.step_events.get(0, []):
-            if e.get("type") == "pillar_explode":
-                exploded.append((round(e["x"], 4), round(e["y"], 4)))
         s = env.get_snapshot()["boss"].get("seal")
         if s is not None:
             checked_snaps += 1
+            centers.add((round(s["safe_x"], 3), round(s["safe_y"], 3)))
             for (px, py) in _seal_safe_points(s["safe_x"], s["safe_y"], s["safe_r"]):
                 if not env._unit_hidden(types.SimpleNamespace(x=px, y=py)):
                     all_hidden_ok = False
         if env.boss.active_pattern is None:
             break
-    # (b) 안전 원 둘레+중심 9점이 매 스냅샷 은신 판정을 통과 (불변식)
     check(checked_snaps > 0, "seal 스냅샷 수집됨")
-    check(all_hidden_ok, "안전 원 9점 전부 은신 판정 통과(원 안=무조건 은신 불변식)")
-    # (c) doomed 스케줄이 실제 폭발 순서와 일치
-    check(exploded == doomed0, f"doomed 스케줄 == 실제 폭발 순서 (예정 {doomed0} vs 실제 {exploded})")
+    check(all_hidden_ok, "안전 원 9점 전부 진입 판정 통과(원 안=무조건 생존 불변식)")
+    check(len(centers) >= 2, f"웨이브마다 안전 석상 변경 ({len(centers)}곳)")
 
 
 # ─────────────────── 7. 딜러 방향 라인 평타 / Q·W / 궁극기 ───────────────────
