@@ -33,11 +33,31 @@ class RewardComputer:
                       기믹은 Layer 1 BT 소관 → RL 학습 공간 축소·수렴 가속(NUM2.md 3.3).
     """
 
-    def __init__(self, cfg: RaidConfig, mode: str = "full"):
+    # 기믹 이벤트 타입 → 보상 그룹 (경계 재배치 실험 M1~M5 의 선택적 보상 복원용)
+    _EVENT_GROUP = {
+        "guard_success": "guard",
+        "counter_success": "counter", "counter_fail": "counter",
+        "parry_success": "parry", "parry_fail": "parry",
+        "stagger_break": "stagger", "stagger_fail": "stagger",
+        "stagger_contribute": "stagger",
+        "rush_pillar_hit": "rush",
+        "mechanic_success": "brand", "mechanic_fail": "brand",
+        "seal_holding": "seal", "seal_success": "seal", "seal_fail": "seal",
+    }
+
+    def __init__(self, cfg: RaidConfig, mode: str = "full", gimmick_groups=None):
+        """gimmick_groups: combat_only 모드에서 선택적으로 복원할 기믹 보상 그룹 집합.
+        경계 재배치 실험(BT 규칙을 끄고 해당 기믹을 RL 로 내릴 때)에서 그 기믹의
+        학습 신호를 살리기 위해 사용. 예: {"seal"} — 전멸기 보상만 복원.
+        그룹: guard/counter/parry/stagger/rush/brand/seal."""
         self.cfg = cfg
         if mode not in ("full", "combat_only"):
             raise ValueError(f"unknown reward mode: {mode}")
         self.mode = mode
+        self.gimmick_groups = frozenset(gimmick_groups or ())
+
+    def _group_on(self, group: str) -> bool:
+        return self.mode == "full" or group in self.gimmick_groups
 
     def compute(self, env: "RaidEnv") -> Dict[str, float]:
         gimmicks = (self.mode == "full")
@@ -116,11 +136,13 @@ class RewardComputer:
                 if e.get("type") == "phase_clear":
                     r += cfg.rw_phase_clear
 
-            # ── 기믹 이벤트 (full 모드 전용 — combat_only 는 BT 소관이라 제거) ──
+            # ── 기믹 이벤트 (full 모드 전용 — combat_only 는 BT 소관이라 제거.
+            #     단, gimmick_groups 로 복원된 그룹은 combat_only 에서도 반영) ──
             for e in events:
-                if not gimmicks:
-                    break
                 t = e.get("type")
+                grp = self._EVENT_GROUP.get(t)
+                if grp is None or not self._group_on(grp):
+                    continue
                 if t == "guard_success":
                     r += cfg.rw_guard_success
                 elif t == "counter_success":
@@ -151,8 +173,8 @@ class RewardComputer:
                 elif t == "seal_fail":
                     r += cfg.rw_seal_fail
 
-            # ── 붉은 낙인 산개 shaping (full 전용 — 산개는 BT 소관) ──
-            if gimmicks and ap is not None and ap.mode == "steps" and ap.pattern_id == PatternID.CRIMSON_BRAND:
+            # ── 붉은 낙인 산개 shaping (full 또는 brand 그룹 복원 시) ──
+            if self._group_on("brand") and ap is not None and ap.mode == "steps" and ap.pattern_id == PatternID.CRIMSON_BRAND:
                 step = ap.current_step()
                 if step is not None:
                     mark_uid = step.extra.get("target_uid")
@@ -168,8 +190,8 @@ class RewardComputer:
                         d = _dist(mu.x, mu.y, u.x, u.y)
                         r += min(d / ideal, 1.0) * cfg.rw_brand_spread * (0.3 + urgency)
 
-            # ── 스태거 집결 딜 (full 전용 — 무력화 대응은 BT 소관) ──
-            if gimmicks and env.boss.stagger_active and boss_dist <= u.attack_range:
+            # ── 스태거 집결 딜 (full 또는 stagger 그룹 복원 시) ──
+            if self._group_on("stagger") and env.boss.stagger_active and boss_dist <= u.attack_range:
                 r += 0.5
 
             # 생존/참여

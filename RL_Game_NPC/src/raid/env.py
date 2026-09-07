@@ -1387,7 +1387,15 @@ class RaidEnv:
               b.stagger_gauge / max(1.0, cfg.stagger_max)]
         seal_active = 1.0 if (ap is not None and ap.mode == "seal") else 0.0
         hidden = 1.0 if (seal_active and self._unit_hidden(u)) else 0.0
-        v += [seal_active, bdx / 10.0, bdy / 10.0, hidden]
+        # seal 방향 특징: 웨이브제 개편으로 "현재 빛나는 석상(안전 지점)" 벡터를 싣는다.
+        # (구현이 보스 벡터를 재사용하던 것을 수정 — 전멸기를 RL 로 내리는 경계 재배치
+        # 실험 M1 에서 안전 지점 정보 없이는 학습이 원천 불가능했다.)
+        sdx, sdy = bdx, bdy
+        if seal_active and ap is not None:
+            sc = self._seal_safe_circle(ap)
+            if sc is not None:
+                sdx, sdy = sc[0] - u.x, sc[1] - u.y
+        v += [seal_active, sdx / 10.0, sdy / 10.0, hidden]
         # counter alignment (딜러가 전방 정렬돼 있으면 1 근처)
         align = 0.0
         if b.counter_window_turns > 0:

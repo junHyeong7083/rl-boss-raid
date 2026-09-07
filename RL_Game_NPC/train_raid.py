@@ -194,8 +194,26 @@ class RoleBuffer:
 
 # ─────────────────── 학습기 ───────────────────
 
+# BT 규칙을 껐을 때 RL 에 복원해야 하는 기믹 보상 그룹 (경계 재배치 실험 M1~M4)
+RULE_REWARD_GROUP = {
+    "seal_hide": "seal",
+    "brand_spread": "brand",
+    "stagger_dps": "stagger",
+    "imminent_escape": None,   # 위험 페널티는 combat_only 에도 이미 있음
+    "yellow_escape": None,
+    "rush_lure": "rush",
+}
+
+
 class RaidTrainer:
-    def __init__(self, cfg: RaidConfig, tcfg: TrainCfg, device_str: str, seed: int = 0):
+    def __init__(self, cfg: RaidConfig, tcfg: TrainCfg, device_str: str, seed: int = 0,
+                 intervention_mode: str = "smdp",
+                 bt_disabled=None, bt_extra=None):
+        """intervention_mode — BT 개입 턴의 학습 표본 처리(제거 실험 D/E/F):
+          "smdp"  (F, 기본): 개입 턴 표본 제외 + 보상을 직전 RL 결정에 누적 (현행)
+          "naive" (D): BT 행동을 정책 표본처럼 버퍼에 포함(단순 혼합) — logp/V 는 현 정책으로 평가
+          "drop"  (E): 개입 턴 표본 제외 + 해당 턴 보상도 폐기
+        bt_disabled/bt_extra — BT 규칙 on/off (경계 재배치 실험 M1~M5)."""
         import torch
         self.torch = torch
         self.cfg = cfg
@@ -203,10 +221,19 @@ class RaidTrainer:
         self.device = torch.device(device_str)
         self.rng = random.Random(seed)
         np.random.seed(seed); torch.manual_seed(seed)
+        if intervention_mode not in ("smdp", "naive", "drop"):
+            raise ValueError(f"unknown intervention_mode: {intervention_mode}")
+        self.intervention_mode = intervention_mode
+        self.bt_disabled = frozenset(bt_disabled or ())
+        self.bt_extra = frozenset(bt_extra or ())
 
         self.env = RaidEnv(cfg, seed=seed)
-        # combat_only 보상(기믹 보상 제거 — Layer 1 BT 소관)
-        self.env.reward_computer = RewardComputer(cfg, mode="combat_only")
+        # combat_only 보상 + 꺼진 BT 규칙의 기믹 보상 그룹 선택 복원(RL 이 학습해야 하므로)
+        groups = {g for r in self.bt_disabled
+                  for g in [RULE_REWARD_GROUP.get(r)] if g}
+        self.reward_groups = groups
+        self.env.reward_computer = RewardComputer(cfg, mode="combat_only",
+                                                  gimmick_groups=groups)
 
         # 역할별 네트워크 + 옵티마이저
         self.nets = {}
@@ -219,7 +246,10 @@ class RaidTrainer:
         # NPC uid ↔ role
         self.npc_uids = [i for i, r in enumerate(cfg.party_roles) if r != PartyRole.DEALER]
         self.uid_role = {i: cfg.party_roles[i] for i in self.npc_uids}
-        self.bts = {uid: BTGimmickLayer(self.env, uid) for uid in self.npc_uids}
+        self.bts = {uid: BTGimmickLayer(self.env, uid,
+                                        disabled_rules=self.bt_disabled,
+                                        extra_rules=self.bt_extra)
+                    for uid in self.npc_uids}
         self.player = PlayerModelWrapper(self.env, cfg.player_slot, cfg, self.rng)
 
         self.buffers = {role: RoleBuffer() for role in TRAIN_ROLES}
@@ -231,6 +261,16 @@ class RaidTrainer:
         with torch.no_grad():
             a, logp, val = self.nets[role].get_action(o, deterministic=deterministic)
         return int(a.item()), float(logp.item()), float(val.item())
+
+    def _eval_action(self, role, obs, act):
+        """주어진 (obs, act)의 현 정책 logp/V — naive(단순 혼합) 모드에서 BT 행동을
+        정책 표본처럼 취급할 때 사용."""
+        torch = self.torch
+        o = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        a = torch.as_tensor([int(act)], dtype=torch.long, device=self.device)
+        with torch.no_grad():
+            logp, val, _ = self.nets[role].evaluate_actions(o, a)
+        return float(logp.item()), float(val.item())
 
     # ── 한 에피소드 롤아웃(학습 표본 수집) ──
     def run_episode(self, collect=True) -> Dict:
@@ -252,6 +292,16 @@ class RaidTrainer:
         last_move = {uid: None for uid in self.npc_uids}
         gimmick_success = 0
         gimmick_total = 0
+        # 논문용 상세 수집: 이벤트 타입별 횟수(파티 전체), 역할별 보상 합,
+        # 탱커 어그로 1위 점유율, BT 규칙별 발화 횟수
+        ev_counts: Dict[str, int] = {}
+        role_rewards: Dict[str, float] = {}
+        tank_uid = next((uid for uid in self.npc_uids
+                         if self.uid_role[uid] == PartyRole.TANK), None)
+        tank_top = 0
+        total_turns = 0
+        for bt in self.bts.values():
+            bt.reset_counts()
 
         def flush(role, done_flag):
             pen = pending[role]
@@ -263,6 +313,7 @@ class RaidTrainer:
         while not env.done:
             actions = {"p0": self.player.act()}
             rl_decisions = {}   # uid -> (role, obs, act, logp, val)
+            bt_decisions = {}   # uid -> (role, obs, act) — naive(단순 혼합) 모드 전용
             for uid in self.npc_uids:
                 obs_hist[uid].append(env._observe(uid))
             for uid in self.npc_uids:
@@ -271,6 +322,8 @@ class RaidTrainer:
                 if a is not None:
                     bt_fires += 1
                     actions[f"p{uid}"] = int(a)
+                    if collect and self.intervention_mode == "naive":
+                        bt_decisions[uid] = (role, obs_hist[uid][0], int(a))
                 else:
                     rl_turns += 1
                     obs = obs_hist[uid][0]   # delay 턴 전 관측(배포와 동일)
@@ -299,8 +352,23 @@ class RaidTrainer:
                             "counter", "stagger", "seal", "parry", "mechanic"):
                         gimmick_total += 1
 
-            # 보상 귀속(semi-MDP): 이번 턴 RL 결정이면 직전 pending 닫고 새로 연다.
-            #                       BT 턴이면 보상만 직전 pending 에 누적.
+            # 논문용 수집: 이벤트 타입별 카운트 / 역할별 보상 / 탱커 어그로 점유율
+            total_turns += 1
+            if tank_uid is not None and env.boss.top_aggro_uid() == tank_uid:
+                tank_top += 1
+            for evs in env.step_events.values():
+                for e in evs:
+                    t = e.get("type", "")
+                    ev_counts[t] = ev_counts.get(t, 0) + 1
+            for uid in self.npc_uids:
+                rname = self.uid_role[uid].name.lower()
+                role_rewards[rname] = role_rewards.get(rname, 0.0) \
+                    + float(rewards.get(f"p{uid}", 0.0))
+
+            # 보상 귀속 — intervention_mode 에 따라 BT 개입 턴 처리 분기(제거 실험 D/E/F):
+            #   smdp(F): RL 턴이면 pending 닫고 새로 열고, BT 턴 보상은 직전 pending 에 누적
+            #   naive(D): BT 턴도 정책 표본으로 버퍼에 포함(logp/V 는 현 정책 평가값)
+            #   drop(E): BT 턴 표본 제외 + 그 턴 보상 폐기
             for uid in self.npc_uids:
                 role = self.uid_role[uid]
                 rw = float(rewards.get(f"p{uid}", 0.0))
@@ -310,8 +378,16 @@ class RaidTrainer:
                         _, obs, act, logp, val = rl_decisions[uid]
                         pending[role] = {"obs": obs, "act": act, "logp": logp,
                                          "val": val, "rew": rw}
+                elif uid in bt_decisions:
+                    # naive: BT 행동을 "정책이 고른 것처럼" 표본화 (단순 혼합의 정의)
+                    flush(role, done_flag=False)
+                    _, obs, act = bt_decisions[uid]
+                    logp, val = self._eval_action(role, obs, act)
+                    pending[role] = {"obs": obs, "act": act, "logp": logp,
+                                     "val": val, "rew": rw}
                 else:
-                    if collect and pending[role] is not None:
+                    if collect and pending[role] is not None \
+                            and self.intervention_mode != "drop":
                         pending[role]["rew"] += rw
 
         # 에피소드 종료 — 열린 트랜지션 flush(done=True)
@@ -319,6 +395,10 @@ class RaidTrainer:
             for role in TRAIN_ROLES:
                 flush(role, done_flag=True)
 
+        rule_fires: Dict[str, int] = {}
+        for bt in self.bts.values():
+            for rule, n in bt.fire_counts.items():
+                rule_fires[rule] = rule_fires.get(rule, 0) + n
         return {
             "victory": env.victory, "wipe": env.wipe, "steps": env.current_step,
             "boss_hp_ratio": env.boss.hp / self.cfg.boss_max_hp,
@@ -326,6 +406,11 @@ class RaidTrainer:
             "move_change_ratio": move_changes / max(1, move_total),
             "gimmick_success_rate": gimmick_success / max(1, gimmick_total),
             "disposition": self.player.disposition,
+            # 논문용 상세(metrics.jsonl 로 직렬화)
+            "events": ev_counts,
+            "rule_fires": rule_fires,
+            "role_rewards": {k: round(v, 2) for k, v in role_rewards.items()},
+            "tank_top_aggro_ratio": round(tank_top / max(1, total_turns), 4),
         }
 
     # ── PPO 업데이트 ──
@@ -348,6 +433,7 @@ class RaidTrainer:
             n = len(buf)
             net = self.nets[role]; opt = self.opts[role]
             ploss = vloss = ent = 0.0; nb = 0
+            clip_frac = kl_sum = 0.0   # 학습 안정성 지표(제거 실험 비교용)
             for _ in range(tcfg.epochs):
                 idx = np.random.permutation(n)
                 for s in range(0, n, tcfg.batch_size):
@@ -368,9 +454,14 @@ class RaidTrainer:
                     opt.step()
                     ploss += policy_loss.item(); vloss += value_loss.item()
                     ent += entropy_loss.item(); nb += 1
+                    with torch.no_grad():
+                        clip_frac += float((torch.abs(ratio - 1.0) > tcfg.clip_eps)
+                                           .float().mean().item())
+                        kl_sum += float((b_old - new_logp).mean().item())
             stats[role.name.lower()] = {
                 "policy_loss": ploss / max(1, nb), "value_loss": vloss / max(1, nb),
                 "entropy": ent / max(1, nb), "samples": n,
+                "clip_frac": clip_frac / max(1, nb), "approx_kl": kl_sum / max(1, nb),
             }
             buf.clear()
         return stats
@@ -510,6 +601,16 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-randomize-player", action="store_true",
                     help="플레이어 모델 도메인 랜덤화 비활성(aggressive 고정)")
+    # ── 제거 실험(D/E/F) + 경계 재배치 실험(M1~M5) ──
+    ap.add_argument("--intervention-mode", type=str, default="smdp",
+                    choices=["smdp", "naive", "drop"],
+                    help="BT 개입 턴 표본 처리: smdp(F,기본)/naive(D,단순 혼합)/drop(E,보상 폐기)")
+    ap.add_argument("--bt-disable", type=str, default="",
+                    help="끌 BT 규칙(콤마): seal_hide,brand_spread,stagger_dps,imminent_escape,yellow_escape,rush_lure")
+    ap.add_argument("--bt-extra", type=str, default="",
+                    help="추가 BT 규칙(콤마): aggro_taunt (M5 역방향)")
+    ap.add_argument("--run-label", type=str, default="",
+                    help="실험 조건 라벨(run_meta.json/metrics.jsonl 에 기록)")
     args = ap.parse_args()
 
     import torch
@@ -528,15 +629,40 @@ def main():
     csv_path = os.path.join(args.model_dir, "train_log.csv")
     os.makedirs(args.model_dir, exist_ok=True)
 
-    trainer = RaidTrainer(cfg, tcfg, device_str, seed=args.seed)
+    bt_disabled = {s.strip() for s in args.bt_disable.split(",") if s.strip()}
+    bt_extra = {s.strip() for s in args.bt_extra.split(",") if s.strip()}
+    trainer = RaidTrainer(cfg, tcfg, device_str, seed=args.seed,
+                          intervention_mode=args.intervention_mode,
+                          bt_disabled=bt_disabled, bt_extra=bt_extra)
     if args.resume:
         trainer.load(args.resume)
     if args.bc_episodes > 0:
         trainer.behavior_clone(args.bc_episodes)
 
+    # 실험 조건 메타 기록 — 논문 재현성/조건 추적용
+    import json as _json
+    meta = {
+        "run_label": args.run_label or args.model_dir,
+        "intervention_mode": args.intervention_mode,
+        "bt_disabled": sorted(bt_disabled), "bt_extra": sorted(bt_extra),
+        "reward_groups": sorted(trainer.reward_groups),
+        "episodes": args.episodes, "bc_episodes": args.bc_episodes,
+        "seed": args.seed, "curriculum": list(stages),
+        "seal": {"waves": cfg.seal_waves, "wave_turns": cfg.seal_wave_turns},
+        "map": [cfg.map_width, cfg.map_height],
+        "cooldowns": {"heal": cfg.skill_cooldowns.get(int(RaidActionID.HEAL)),
+                      "guard": cfg.skill_cooldowns.get(int(RaidActionID.GUARD))},
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with open(os.path.join(args.model_dir, "run_meta.json"), "w", encoding="utf-8") as f:
+        _json.dump(meta, f, ensure_ascii=False, indent=2)
+    metrics_path = os.path.join(args.model_dir, "metrics.jsonl")
+
     print(f"[TRAIN] device={device_str} episodes={args.episodes} "
           f"stages(HP)={stages} advance_winrate={advance_wr} "
-          f"randomize_player={cfg.player_model_randomize}", flush=True)
+          f"randomize_player={cfg.player_model_randomize} "
+          f"mode={args.intervention_mode} bt_off={sorted(bt_disabled)} "
+          f"bt_extra={sorted(bt_extra)}", flush=True)
 
     stage = 0
     cfg.boss_max_hp = stages[stage]
@@ -555,6 +681,18 @@ def main():
             recent_wins.append(1 if r["victory"] else 0)
             batch_results.append(r)
             ep += 1
+            # 논문용 에피소드 단위 상세 로그(수렴 곡선·기믹별 성공률·행동 분포 분석 소스)
+            with open(metrics_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps({
+                    "ep": ep, "stage": stage, "boss_hp": cfg.boss_max_hp,
+                    "victory": bool(r["victory"]), "steps": int(r["steps"]),
+                    "disposition": r["disposition"],
+                    "bt_fire_ratio": round(r["bt_fire_ratio"], 4),
+                    "gimmick_success_rate": round(r["gimmick_success_rate"], 4),
+                    "tank_top_aggro_ratio": r["tank_top_aggro_ratio"],
+                    "events": r["events"], "rule_fires": r["rule_fires"],
+                    "role_rewards": r["role_rewards"],
+                }, ensure_ascii=False) + "\n")
         stats = trainer.update()
 
         roll_wr = sum(recent_wins) / max(1, len(recent_wins))

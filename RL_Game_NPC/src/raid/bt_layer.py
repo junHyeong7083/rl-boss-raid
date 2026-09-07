@@ -39,9 +39,18 @@ class BTGimmickLayer:
     last_decision: {"rule": name|None, "fired": bool, "reason": str}
     """
 
-    def __init__(self, env: "RaidEnv", uid: int):
+    def __init__(self, env: "RaidEnv", uid: int,
+                 disabled_rules=None, extra_rules=None):
+        """disabled_rules: 끌 규칙 이름 집합 — 경계 재배치 실험(M1~M4)에서 해당 기믹을
+        RL 소관으로 내릴 때 사용. 규칙 이름: seal_hide/tank_guard/imminent_escape/
+        brand_spread/stagger_taunt/stagger_dps/yellow_escape/rush_lure.
+        extra_rules: 추가로 켤 규칙 — "aggro_taunt"(M5 역방향: 어그로 관리를 BT 로 승격).
+        fire_counts: 규칙별 발화 횟수(연구 로깅) — 호출측이 읽고 reset_counts() 로 초기화."""
         self.env = env
         self.uid = uid
+        self.disabled_rules = frozenset(disabled_rules or ())
+        self.extra_rules = frozenset(extra_rules or ())
+        self.fire_counts = {}
         # 검증된 전투/회피 헬퍼를 재사용(파일 수정 없이 조합). BT 는 이 헬퍼들의
         # _seal_hide/_safe_move/_maybe_guard/_brand_action/_attack_or_approach/
         # _move_toward_avoiding 만 골라 호출한다.
@@ -51,7 +60,14 @@ class BTGimmickLayer:
     # ── 로깅 헬퍼 ──
     def _fire(self, rule: str, reason: str, action: int) -> int:
         self.last_decision = {"rule": rule, "fired": True, "reason": reason}
+        self.fire_counts[rule] = self.fire_counts.get(rule, 0) + 1
         return int(action)
+
+    def reset_counts(self):
+        self.fire_counts = {}
+
+    def _on(self, rule: str) -> bool:
+        return rule not in self.disabled_rules
 
     def _pass(self, reason: str) -> None:
         self.last_decision = {"rule": None, "fired": False, "reason": reason}
@@ -67,12 +83,12 @@ class BTGimmickLayer:
         ap = b.active_pattern
 
         # 1) 전멸기 '혈월 강림' — 최종 생존 기둥 뒤 LOS 은신 (최우선)
-        if ap is not None and ap.mode == "seal":
+        if self._on("seal_hide") and ap is not None and ap.mode == "seal":
             return self._fire("seal_hide", "seal_wipe_active", self._fsm._seal_hide(u))
 
         # 2) 임박 위험 — 내가 텔레그래프 안 & 현재 스텝 잔여 ≤2턴 → 최속 탈출.
         #    (여유 있으면(잔여>2) fire 안 함 → RL 이 선제 포지셔닝. NUM2.md 시나리오 B/C.)
-        if ap is not None and ap.mode == "steps" and ap.turns_remaining <= 2 \
+        if self._on("imminent_escape") and ap is not None and ap.mode == "steps" and ap.turns_remaining <= 2 \
                 and any(s.contains((u.x, u.y)) for s in self._fsm._world_shapes()):
             # 탱커 가드 딜타임 예외: 피격 임박 스텝이면 GUARD 로 경감+보스 경직.
             if u.role == PartyRole.TANK:
@@ -85,12 +101,12 @@ class BTGimmickLayer:
             # 탈출로가 전부 막힘(희소) — RL 에 위임.
 
         # 3) 붉은 낙인(CRIMSON_BRAND) 산개/이격.
-        brand = self._fsm._brand_action(u)
+        brand = self._fsm._brand_action(u) if self._on("brand_spread") else None
         if brand is not None:
             return self._fire("brand_spread", "crimson_brand_mark", brand)
 
         # 4) 무력화 그로기(stagger_active) — 근접 확보 + 딜 집중. 탱커는 TAUNT 우선.
-        if b.stagger_active:
+        if self._on("stagger_dps") and b.stagger_active:
             if u.role == PartyRole.TANK \
                     and u.cooldowns.get(int(RaidActionID.TAUNT), 0) <= 0:
                 return self._fire("stagger_taunt", "stagger_window_tank", int(RaidActionID.TAUNT))
@@ -99,7 +115,7 @@ class BTGimmickLayer:
 
         # 5) YELLOW_BURST(노란 확산 원 = 패링 장판) — NPC 는 파훼 불가 → 원 밖 탈출.
         #    (패링은 딜러 G 전용. 임박 전이라도 원 안이면 미리 빠진다.)
-        if ap is not None and ap.mode == "steps" \
+        if self._on("yellow_escape") and ap is not None and ap.mode == "steps" \
                 and ap.pattern_id == PatternID.YELLOW_BURST \
                 and ap.contains((u.x, u.y)):
             mv = self._fsm._safe_move(u)
@@ -107,13 +123,20 @@ class BTGimmickLayer:
                 return self._fire("yellow_escape", "parry_field_npc_evac", mv)
 
         # 6) FRENZY_RUSH 표식 대상이 나(NPC) → 기둥 방향 유도(보스 충돌 그로기).
-        if ap is not None and ap.mode == "steps" \
+        if self._on("rush_lure") and ap is not None and ap.mode == "steps" \
                 and ap.pattern_id == PatternID.FRENZY_RUSH \
                 and env._rush_target_uid(ap) == self.uid:
             lure = self._pillar_lure_point(u)
             if lure is not None:
                 return self._fire("rush_lure", "frenzy_rush_target_self",
                                   self._fsm._move_toward_avoiding(u, lure[0], lure[1]))
+
+        # 6.5) [실험 M5 역방향] 어그로 관리를 BT 규칙으로 승격 — 탱커가 어그로 1위가
+        #      아니고 도발 쿨이 없으면 무조건 도발. (기본 비활성 — extra_rules 로 켬)
+        if "aggro_taunt" in self.extra_rules and u.role == PartyRole.TANK \
+                and b.top_aggro_uid() != u.uid \
+                and u.cooldowns.get(int(RaidActionID.TAUNT), 0) <= 0:
+            return self._fire("aggro_taunt", "tank_aggro_rule", int(RaidActionID.TAUNT))
 
         # 7) 기믹 없음 → RL 위임.
         return self._pass("no_gimmick")
