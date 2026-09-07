@@ -46,7 +46,7 @@ namespace BossRaid
         // ─────────────── 인스펙터 토글(문제 시 즉시 끄기) ───────────────
 
         [Header("Toggles")]
-        [Tooltip("혈월 마법진 바닥 적용")] public bool enableFloor = true;
+        [Tooltip("혈월 마법진 바닥 적용 — 장식용 붉은 원이 위험 텔레그래프와 혼동되어 기본 OFF")] public bool enableFloor = false;
         [Tooltip("캐릭터 림라이트 적용 — 기본 OFF. 미검증 셰이더로 캐릭터 전체 머티리얼을 교체하다 " +
                  "컴파일 실패 시 캐릭터가 전부 사라지는 사고가 있었음(2026-07-13). " +
                  "에디터에서 RimLit.shader 정상 컴파일 확인 후 켤 것.")]

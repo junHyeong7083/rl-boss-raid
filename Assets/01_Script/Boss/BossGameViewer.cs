@@ -224,6 +224,9 @@ namespace BossRaid
             // V2: 기둥 동기화 (alive → SetActive, 파괴 순간 이벤트)
             SyncPillars(snap.pillars);
 
+            // 전멸기 웨이브: '빛나는 석상'(안전 석상) 식별 → LateUpdate 에서 이미시브 펄스
+            SyncSealLitPillar(snap);
+
             // 원형 아레나 경계 링 갱신(축소 감지 → 펄스)
             if (snap.boss != null) UpdateArenaBoundary(snap.boss.arena_radius);
 
@@ -295,6 +298,74 @@ namespace BossRaid
                     t.gameObject.SetActive(p.alive);
 
                 _pillarAlivePrev[i] = p.alive;
+            }
+        }
+
+        // ─────────────── 전멸기: '빛나는 석상'(안전 석상) 발광 ───────────────
+        // 웨이브제 전멸기에서 진입해야 할 석상을 안전 원 마커(SafeGuideMarker)에 더해
+        // 석상 본체 이미시브 펄스(초록 = 안전)로도 표시한다. seal.safe_x/y 가 석상 중심과
+        // 일치(서버 계약)하므로 최근접 매칭으로 대상 석상을 찾는다.
+        private int _litPillarIdx = -1;
+        private MaterialPropertyBlock _pillarMpb;
+        private Renderer[][] _pillarRenderers;
+        private static readonly int PillarEmissionId = Shader.PropertyToID("_EmissionColor");
+        private static readonly Color LitPillarGlow = new Color(0.30f, 1.00f, 0.55f);
+
+        private void SyncSealLitPillar(BossSnapshot snap)
+        {
+            int lit = -1;
+            var seal = snap != null && snap.boss != null ? snap.boss.seal : null;
+            if (seal != null && seal.active == 1 && snap.pillars != null && _pillarViews != null)
+            {
+                float best = 2.0f;   // sim 좌표 허용 오차
+                int n = Mathf.Min(snap.pillars.Length, _pillarViews.Length);
+                for (int i = 0; i < n; i++)
+                {
+                    var p = snap.pillars[i];
+                    if (p == null || !p.alive) continue;
+                    float d = Mathf.Abs(p.x - seal.safe_x) + Mathf.Abs(p.y - seal.safe_y);
+                    if (d < best) { best = d; lit = i; }
+                }
+            }
+            if (lit != _litPillarIdx)
+            {
+                ClearLitPillarGlow(_litPillarIdx);
+                _litPillarIdx = lit;
+            }
+        }
+
+        private Renderer[] LitPillarRenderers(int idx)
+        {
+            if (_pillarViews == null || idx < 0 || idx >= _pillarViews.Length) return null;
+            if (_pillarRenderers == null) _pillarRenderers = new Renderer[_pillarViews.Length][];
+            if (_pillarRenderers[idx] == null && _pillarViews[idx] != null)
+                _pillarRenderers[idx] = _pillarViews[idx].GetComponentsInChildren<Renderer>(true);
+            return _pillarRenderers[idx];
+        }
+
+        private void ClearLitPillarGlow(int idx)
+        {
+            var rs = LitPillarRenderers(idx);
+            if (rs == null) return;
+            foreach (var r in rs)
+                if (r != null) r.SetPropertyBlock(null);
+        }
+
+        private void LateUpdate()
+        {
+            if (_litPillarIdx < 0) return;
+            var rs = LitPillarRenderers(_litPillarIdx);
+            if (rs == null) return;
+            if (_pillarMpb == null) _pillarMpb = new MaterialPropertyBlock();
+            float k = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * 6.0f);
+            Color emis = LitPillarGlow * (0.6f + 1.4f * k);
+            foreach (var r in rs)
+            {
+                if (r == null) continue;
+                if (r.material != null) r.material.EnableKeyword("_EMISSION");
+                r.GetPropertyBlock(_pillarMpb);
+                _pillarMpb.SetColor(PillarEmissionId, emis);
+                r.SetPropertyBlock(_pillarMpb);
             }
         }
 
