@@ -115,6 +115,39 @@ namespace BossRaid
         private static readonly int ColorId     = Shader.PropertyToID("_Color");
         private static readonly int EmissionId  = Shader.PropertyToID("_EmissionColor");
 
+        // ─────────────── 버프 시각화 (쉐이더 림 맥동 + 머리 위 버프명 라벨) ───────────────
+        // 기존 절차 오라/프리팹 이펙트는 유지하고, "어떤 버프가 걸려 있는지"를 확실히 읽히게 두 장치를 추가한다.
+        //   · 림: 본체 RimLit 의 _RimColor/_RimIntensity 를 MPB 로 버프 색으로 맥동(RimLit 이 아니면 이미시브만 적용).
+        //   · 라벨: 머리 위 TextMesh 에 "공격↑ 3  보호막 2" 처럼 버프명 + 잔여 턴을 버프 색으로 표기.
+        // 색은 PartyFrameUI 의 버프 색점과 동일하게 맞춰 화면 전체에서 한 버프 = 한 색이 되게 한다.
+        [Header("Buff Visual (쉐이더 림 + 상단 라벨)")]
+        [Tooltip("버프 중 본체 림라이트(RimLit _RimColor/_RimIntensity)를 버프 색으로 맥동. RimLit 이 아니면 이미시브로 폴백")]
+        public bool buffRimEnabled = true;
+        [Tooltip("버프 중 머리 위에 '공격↑ 3  보호막 2' 형태로 적용 중 버프명과 잔여 턴 표시")]
+        public bool buffLabelEnabled = true;
+        [Tooltip("라벨 높이(유닛 기준 월드 y). 0 이면 본체 렌더러 최상단 + 0.35 로 자동")]
+        public float buffLabelHeight = 0f;
+        [Tooltip("림 맥동 주기(초)")]
+        public float buffRimPulsePeriod = 0.8f;
+        [Tooltip("림 강도 범위(최소~최대) — RimLit _RimIntensity")]
+        public Vector2 buffRimIntensityRange = new Vector2(1.8f, 3.4f);
+        [Tooltip("복수 버프 동시 적용 시 림 색 순환 간격(초)")]
+        public float buffRimCycleInterval = 0.6f;
+
+        private static readonly Color BuffAtkColor    = new Color(1.00f, 0.45f, 0.15f, 1f); // 공버프 주황 (PartyFrameUI 동일)
+        private static readonly Color BuffShieldColor = new Color(0.30f, 0.80f, 1.00f, 1f); // 실드 하늘
+        private static readonly Color BuffGuardColor  = new Color(0.90f, 0.78f, 0.35f, 1f); // 가드 금색
+        private static readonly int RimColorId     = Shader.PropertyToID("_RimColor");
+        private static readonly int RimIntensityId = Shader.PropertyToID("_RimIntensity");
+
+        private readonly List<Color> _activeBuffColors = new List<Color>(3);
+        private bool _buffRimWasActive;
+        private Color[] _fxRimColors;               // 렌더러별 머티리얼 원본 림 색(해제 시 원복용)
+        private float[] _fxRimIntensity;
+        private TextMesh _buffLabel;
+        private Transform _buffLabelTf;
+        private float _buffLabelY;
+
         private void Awake()
         {
             if (animator == null) animator = GetComponentInChildren<Animator>();
@@ -154,10 +187,13 @@ namespace BossRaid
             if (_fxColorsReady || _fxRenderers == null) return;
             _fxColorsReady = true;
             _fxBaseColors = new Color[_fxRenderers.Length];
+            _fxRimColors = new Color[_fxRenderers.Length];
+            _fxRimIntensity = new float[_fxRenderers.Length];
             for (int i = 0; i < _fxRenderers.Length; i++)
             {
                 var r = _fxRenderers[i];
                 Color c = Color.white;
+                Color rim = Color.black; float rimI = 0f;
                 if (r != null)
                 {
                     var m = r.sharedMaterial;   // 틴트로 이미 인스턴스화된 머티리얼
@@ -167,9 +203,14 @@ namespace BossRaid
                         else if (m.HasProperty(ColorId)) c = m.GetColor(ColorId);
                         // 이미시브 플래시가 보이도록 키워드 활성(기존 인스턴스에만 적용 — 신규 인스턴스 없음)
                         if (m.HasProperty(EmissionId)) r.material.EnableKeyword("_EMISSION");
+                        // 버프 림 해제 시 원복할 머티리얼 원본 림 값(RimLit 전용, 없으면 0)
+                        if (m.HasProperty(RimColorId)) rim = m.GetColor(RimColorId);
+                        if (m.HasProperty(RimIntensityId)) rimI = m.GetFloat(RimIntensityId);
                     }
                 }
                 _fxBaseColors[i] = c;
+                _fxRimColors[i] = rim;
+                _fxRimIntensity[i] = rimI;
             }
         }
 
@@ -220,6 +261,9 @@ namespace BossRaid
             else ToggleBuffAura(ref _shieldAura, u.buff_shield > 0, new Color(0.42f, 0.72f, 1.00f));
             if (buffAtkEffect) buffAtkEffect.SetActive(u.buff_atk > 0);
             else ToggleBuffAura(ref _atkAura, u.buff_atk > 0, new Color(1.00f, 0.42f, 0.42f));
+
+            // 쉐이더 림 + 머리 위 버프명 라벨 갱신(맥동/빌보드는 LateUpdate)
+            RefreshBuffVisual(u);
 
             // 사망/부활 전환 처리 (다시하기로 부활 시 Dead/deathEffect 원복이 없던 버그 수정).
             // 매 스냅샷 SetBool 남발을 막기 위해 생존 상태가 "바뀔 때만" 적용한다.
@@ -393,6 +437,153 @@ namespace BossRaid
             // 표식이 꺼져야 하면 여기서 제어 (스냅샷의 marked 필드로)
             if (_markInstance != null && _hasData && !_latest.marked)
                 _markInstance.SetActive(false);
+
+            // 버프 림 맥동 + 라벨 빌보드(침강 오프셋 반영 후)
+            UpdateBuffVisual();
+        }
+
+        // ─────────────── 버프 시각화 ───────────────
+
+        /// <summary>스냅샷의 buff_atk/buff_shield/buff_guard 로 활성 버프 색 목록과 머리 위 라벨을 갱신.</summary>
+        private void RefreshBuffVisual(UnitData u)
+        {
+            _activeBuffColors.Clear();
+            if (u.alive)
+            {
+                if (u.buff_atk > 0)    _activeBuffColors.Add(BuffAtkColor);
+                if (u.buff_shield > 0) _activeBuffColors.Add(BuffShieldColor);
+                if (u.buff_guard > 0)  _activeBuffColors.Add(BuffGuardColor);
+            }
+
+            bool showLabel = buffLabelEnabled && _activeBuffColors.Count > 0;
+            if (!showLabel)
+            {
+                if (_buffLabel != null && _buffLabel.gameObject.activeSelf) _buffLabel.gameObject.SetActive(false);
+                return;
+            }
+            EnsureBuffLabel();
+            _buffLabel.text = BuildBuffText(u);
+            if (!_buffLabel.gameObject.activeSelf) _buffLabel.gameObject.SetActive(true);
+        }
+
+        /// <summary>"공격↑ 3  보호막 2  가드 1" — 버프별 고유 색(PartyFrameUI 색점과 동일) + 잔여 턴.</summary>
+        private static string BuildBuffText(UnitData u)
+        {
+            var sb = new System.Text.StringBuilder(64);
+            AppendBuff(sb, "공격↑", u.buff_atk, BuffAtkColor);
+            AppendBuff(sb, "보호막", u.buff_shield, BuffShieldColor);
+            AppendBuff(sb, "가드", u.buff_guard, BuffGuardColor);
+            return sb.ToString();
+        }
+
+        private static void AppendBuff(System.Text.StringBuilder sb, string name, int turns, Color c)
+        {
+            if (turns <= 0) return;
+            if (sb.Length > 0) sb.Append("  ");
+            sb.Append("<color=#").Append(ColorUtility.ToHtmlStringRGB(c)).Append('>')
+              .Append(name).Append(' ').Append(turns).Append("</color>");
+        }
+
+        /// <summary>머리 위 라벨(TextMesh) 지연 생성. 코드 생성 TextMesh 는 폰트/머티리얼을 명시해야 렌더된다.</summary>
+        private void EnsureBuffLabel()
+        {
+            if (_buffLabel != null) return;
+            var go = new GameObject("BuffLabel");
+            go.transform.SetParent(transform, false);
+            var tm = go.AddComponent<TextMesh>();
+            var font = RaidUIFactory.GetFont();
+            if (font != null) tm.font = font;
+            tm.characterSize = 0.08f;
+            tm.fontSize = 64;
+            tm.fontStyle = FontStyle.Bold;
+            tm.anchor = TextAnchor.LowerCenter;
+            tm.alignment = TextAlignment.Center;
+            tm.richText = true;
+            tm.color = Color.white;
+            var mr = go.GetComponent<MeshRenderer>();
+            if (mr != null)
+            {
+                if (font != null) mr.sharedMaterial = font.material;
+                mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                mr.receiveShadows = false;
+                mr.sortingOrder = 50;   // HP 바/이펙트보다 위에
+            }
+            _buffLabelY = buffLabelHeight > 0f ? buffLabelHeight : AutoLabelHeight();
+            _buffLabel = tm;
+            _buffLabelTf = go.transform;
+        }
+
+        /// <summary>본체 렌더러 바운드 최상단 + 0.35 (HP 바 위). 렌더러가 없으면 2.15.</summary>
+        private float AutoLabelHeight()
+        {
+            float top = 0f; bool any = false;
+            if (_fxRenderers != null)
+                foreach (var r in _fxRenderers)
+                    if (r != null) { top = Mathf.Max(top, r.bounds.max.y - transform.position.y); any = true; }
+            return (any ? top : 1.8f) + 0.35f;
+        }
+
+        /// <summary>매 프레임: 라벨을 머리 위에 카메라 정면으로 배치하고, 림라이트를 버프 색으로 맥동시킨다.
+        /// 피격 플래시(MPB _BaseColor/_EmissionColor)와 공존: 림 프로퍼티만 덧씌우고 이미시브는 플래시 중 양보.</summary>
+        private void UpdateBuffVisual()
+        {
+            bool active = _hasData && _activeBuffColors.Count > 0;
+
+            // 라벨 빌보드 — 월드 배치라 부모 회전/침강과 무관하게 항상 머리 위·카메라 정면
+            if (_buffLabelTf != null && _buffLabel.gameObject.activeSelf)
+            {
+                _buffLabelTf.position = transform.position + Vector3.up * (_buffLabelY + _deathSinkY);
+                var cam = Camera.main;
+                if (cam != null) _buffLabelTf.rotation = cam.transform.rotation;
+            }
+
+            if (!buffRimEnabled || _fxRenderers == null) return;
+
+            if (!active)
+            {
+                if (_buffRimWasActive) { _buffRimWasActive = false; RestoreBuffRim(); }
+                return;
+            }
+            if (_isDissolved) return;
+            if (!_buffRimWasActive) { EnsureFxColors(); _buffRimWasActive = true; }   // 이미시브 키워드 + 원본 림 캐시 보장
+
+            float t = Time.unscaledTime;   // 히트스톱(timeScale=0) 중에도 맥동 유지
+            float pulse = 0.5f + 0.5f * Mathf.Sin(t * (2f * Mathf.PI) / Mathf.Max(0.1f, buffRimPulsePeriod));
+            int idx = _activeBuffColors.Count == 1 ? 0
+                    : Mathf.FloorToInt(t / Mathf.Max(0.1f, buffRimCycleInterval)) % _activeBuffColors.Count;
+            Color c = _activeBuffColors[idx];
+            float intensity = Mathf.Lerp(buffRimIntensityRange.x, buffRimIntensityRange.y, pulse);
+            Color rim = c * (1.0f + 0.8f * pulse);            // HDR 림 색
+            Color emis = c * (0.25f + 0.35f * pulse);         // RimLit 이 아닌 머티리얼용 폴백(이미시브 은은한 발광)
+            bool setEmission = _flashCo == null;              // 피격 플래시가 이미시브를 쓰는 동안은 양보
+
+            for (int i = 0; i < _fxRenderers.Length; i++)
+            {
+                var r = _fxRenderers[i];
+                if (r == null) continue;
+                r.GetPropertyBlock(_mpb);
+                _mpb.SetColor(RimColorId, rim);
+                _mpb.SetFloat(RimIntensityId, intensity);
+                if (setEmission) _mpb.SetColor(EmissionId, emis);
+                r.SetPropertyBlock(_mpb);
+            }
+        }
+
+        /// <summary>버프 종료: 림/이미시브를 머티리얼 원본 값으로 되돌린다(플래시/디졸브의 다른 MPB 값은 보존).</summary>
+        private void RestoreBuffRim()
+        {
+            if (_fxRenderers == null) return;
+            bool resetEmission = _flashCo == null;
+            for (int i = 0; i < _fxRenderers.Length; i++)
+            {
+                var r = _fxRenderers[i];
+                if (r == null) continue;
+                r.GetPropertyBlock(_mpb);
+                _mpb.SetColor(RimColorId, _fxRimColors != null ? _fxRimColors[i] : Color.black);
+                _mpb.SetFloat(RimIntensityId, _fxRimIntensity != null ? _fxRimIntensity[i] : 0f);
+                if (resetEmission) _mpb.SetColor(EmissionId, Color.black);
+                r.SetPropertyBlock(_mpb);
+            }
         }
 
         // ─────────────── 피격 흰 플래시 ───────────────
