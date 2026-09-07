@@ -103,9 +103,11 @@ class RewardComputer:
                 else:  # DEALER
                     r += dmg * cfg.rw_boss_damage_per_hp
 
+                tanking = (u.role == PartyRole.TANK
+                           and env.boss.top_aggro_uid() == u.uid)
                 for e in events:
                     if e.get("type") == "damage_taken":
-                        r += -4.0
+                        r += cfg.rw_tank_hit_tanking if tanking else cfg.rw_hit_taken
                     elif e.get("type") == "death":
                         r += cfg.rw_death
 

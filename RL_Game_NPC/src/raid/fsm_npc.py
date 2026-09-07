@@ -91,7 +91,7 @@ class FSMNpcPolicy:
     def _safe_move(self, u) -> Optional[int]:
         env = self.env
         shapes = self._world_shapes()
-        best = None; best_clear = -1.0
+        best = None; best_clear = float("inf")
         for act, dx, dy in _DIRS:
             spd = u.move_speed * (0.7071 if dx and dy else 1.0)
             nx = u.x + dx * spd; ny = u.y + dy * spd
@@ -99,11 +99,32 @@ class FSMNpcPolicy:
                 continue
             if env._blocked_for_unit(u.uid, nx, ny):
                 continue
-            if any(s.contains((nx, ny)) for s in shapes):
-                continue
-            # 여유 확보: 근접 위험 최소인 방향
-            return int(act)
+            if not any(s.contains((nx, ny)) for s in shapes):
+                # 한 걸음 완전 탈출 — 즉시 채택
+                return int(act)
+            # 부분 탈출 폴백: 대형 장판(예: 패링 원 r=3.0 > 이동 1.0/턴) 중심부에선
+            # 한 걸음에 못 벗어난다. 이 방향으로 계속 갈 때 위험을 벗어나기까지
+            # 남는 거리가 최소인 방향으로 전진해 다음 턴 탈출 확률을 높인다.
+            clear = self._escape_distance((nx, ny), (dx, dy), shapes)
+            if clear < best_clear:
+                best_clear = clear; best = int(act)
         return best
+
+    @staticmethod
+    def _escape_distance(pos, direction, shapes,
+                         step: float = 0.4, max_d: float = 8.0) -> float:
+        dx, dy = direction
+        norm = math.hypot(dx, dy)
+        if norm < 1e-8:
+            return max_d
+        dx /= norm; dy /= norm
+        t = 0.0
+        while t < max_d:
+            probe = (pos[0] + dx * t, pos[1] + dy * t)
+            if not any(s.contains(probe) for s in shapes):
+                return t
+            t += step
+        return max_d
 
     def _maybe_guard(self, u) -> Optional[int]:
         """피격 임박 스텝에 장판 안이면 GUARD (딜타임 유발)."""

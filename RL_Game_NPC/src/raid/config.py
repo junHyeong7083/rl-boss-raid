@@ -131,7 +131,7 @@ class RaidConfig:
     # ── 보스 ──
     # 목표 플레이타임 3분 기준 실측 튜닝 (FSM 4인 n=14: 승리 킬타임 중앙값 178.8s,
     # 파티 지속 DPS ~92/턴 × 목표 630턴). 2000 이던 시절엔 18초 컷이었음.
-    boss_max_hp: int = 55000
+    boss_max_hp: int = 27500  # 플레이테스트 하향(원 55000). int 유지 — 55000/2 는 float
     boss_base_attack: int = 30
     boss_defense: int = 3
     boss_radius: float = 1.0
@@ -148,9 +148,14 @@ class RaidConfig:
     crit_multiplier: float = 1.8              # 크리티컬 데미지 배수
 
     # ── 어그로 ──
+    # 도발은 "현재 1위 어그로 × overtake 배수"까지 즉시 끌어올린다(MMO식 탈환).
+    # 고정 보너스만으로는 딜러 딜량(=어그로) 밸런스가 바뀔 때마다 탱커가 1위를
+    # 못 잡는 문제가 재발한다(딜 2~3배 버프 때 실측: 궁 한 방 어그로 1200 >
+    # 도발 유지 상한 ~750 → 탱커가 보스에 붙을 이유가 소멸).
     aggro_decay: float = 0.95
     aggro_damage_weight: float = 1.0
     aggro_taunt_bonus: float = 200.0
+    aggro_taunt_overtake: float = 1.10
 
     # ── 타겟 편향 (플레이어 압박/참여 유도) ──
     # 조준형(타겟 지정) 패턴이 어그로 대상(보통 탱커) 대신 플레이어(딜러)를 직접
@@ -223,16 +228,16 @@ class RaidConfig:
     # Q 혈창 투척 (ATTACK_SKILL)
     aim_q_radius: float = 1.8
     aim_q_range: float = 7.0
-    aim_q_damage: int = 45
+    aim_q_damage: int = 90    # 플레이테스트 상향(원 45)
     # W 혈월 낙하 (SKILL_2)
     aim_w_radius: float = 3.0
     aim_w_range: float = 9.0
-    aim_w_damage: int = 110
+    aim_w_damage: int = 220   # 플레이테스트 상향(원 110)
     # R 궁극기 '혈월 처형' (ULTIMATE) — 초대형 조준 AoE, 딜러 전용, 크리 판정 적용.
     # 무력화(스태거) 활성 중이면 대량 게이지 기여(ult_stagger_contrib).
     aim_ult_radius: float = 4.0
     aim_ult_range: float = 9.0
-    aim_ult_damage: int = 400
+    aim_ult_damage: int = 1200  # 플레이테스트 상향(원 400)
     ult_stagger_contrib: float = 60.0
     # 평타 (딜러 ATTACK_BASIC) — 롤 제리 Q 식 "방향 라인 스킬샷".
     # 쿨 없음, 데미지는 유닛 attack 그대로(별도 상수 없음). aim_points(tx,ty)는 "방향 지시점"으로만
@@ -390,6 +395,11 @@ class RaidConfig:
     rw_tank_aggro_hold: float = 1.5
     rw_tank_aggro_lose: float = -1.0
     rw_taunt_good: float = 2.0
+    # 피격 페널티 차등: 어그로 1위 탱커의 피격은 "정상 탱킹"이므로 약한 페널티만.
+    # 전 역할 일괄 -4.0 이던 시절엔 탱킹 자체가 벌점 → 탱커가 보스에 안 붙는
+    # 정책으로 수렴했다(어그로 보상 +1.5 로는 피격 -4.0 을 못 이김).
+    rw_hit_taken: float = -4.0
+    rw_tank_hit_tanking: float = -0.5
     rw_buff_hit: float = 2.5
     rw_guard_success: float = 12.0
 

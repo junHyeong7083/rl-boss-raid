@@ -443,7 +443,13 @@ class RaidEnv:
                                stagger_action=int(RaidActionID.SKILL_2))
         elif a == RaidActionID.TAUNT:
             u.cooldowns[int(a)] = cd
-            self.boss.add_aggro(u.uid, self.config.aggro_taunt_bonus)
+            # MMO식 도발: 1위 어그로의 overtake 배수까지 즉시 탈환.
+            # 고정 보너스는 하한 — 딜러 딜량이 얼마로 튜닝되든 도발이 무력화되지 않는다.
+            top = max(self.boss.aggro.values()) if self.boss.aggro else 0.0
+            own = self.boss.aggro.get(u.uid, 0.0)
+            target = max(own + self.config.aggro_taunt_bonus,
+                         top * self.config.aggro_taunt_overtake)
+            self.boss.add_aggro(u.uid, target - own)
             self.step_events[u.uid].append({"type": "taunt"})
         elif a == RaidActionID.GUARD:
             u.cooldowns[int(a)] = cd
