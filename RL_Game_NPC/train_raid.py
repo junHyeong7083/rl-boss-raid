@@ -494,18 +494,26 @@ class RaidTrainer:
             X = demo[role]["obs"]; Y = demo[role]["act"]
             if not X:
                 continue
-            obs = torch.as_tensor(np.array(X), dtype=torch.float32, device=self.device)
-            act = torch.as_tensor(np.array(Y), dtype=torch.long, device=self.device)
+            # 메모리 안전화(2026-09-08): 아레나 확대로 에피소드가 길어져 시연이 역할당
+            # 100만 표본(~510MB)에 달함 — 전체를 GPU 에 올리다 병렬 실행 시 OOM/세그폴트.
+            # 시연은 CPU 텐서로 보관하고 미니배치만 GPU 로 옮긴다. 리스트는 즉시 해제.
+            obs_np = np.asarray(X, dtype=np.float32)
+            act_np = np.asarray(Y, dtype=np.int64)
+            demo[role]["obs"] = None; demo[role]["act"] = None
+            X = Y = None
+            obs = torch.from_numpy(obs_np)
+            act = torch.from_numpy(act_np)
             net = self.nets[role]; opt = self.opts[role]
-            n = len(X)
+            n = obs.shape[0]
             for e in range(epochs):
                 idx = np.random.permutation(n)
                 tot = 0.0; nb = 0
                 for s in range(0, n, self.tcfg.batch_size):
-                    bi = torch.as_tensor(idx[s:s + self.tcfg.batch_size], dtype=torch.long,
-                                         device=self.device)
-                    logits, _ = net(obs[bi])
-                    loss = torch.nn.functional.cross_entropy(logits, act[bi])
+                    bi = torch.from_numpy(idx[s:s + self.tcfg.batch_size])
+                    b_obs = obs[bi].to(self.device)
+                    b_act = act[bi].to(self.device)
+                    logits, _ = net(b_obs)
+                    loss = torch.nn.functional.cross_entropy(logits, b_act)
                     opt.zero_grad(); loss.backward(); opt.step()
                     tot += loss.item(); nb += 1
                 print(f"[BC] {role.name.lower()} epoch {e+1}/{epochs} ce={tot/max(1,nb):.3f} "
