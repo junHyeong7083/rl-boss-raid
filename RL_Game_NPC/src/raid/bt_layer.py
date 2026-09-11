@@ -40,7 +40,7 @@ class BTGimmickLayer:
     """
 
     def __init__(self, env: "RaidEnv", uid: int,
-                 disabled_rules=None, extra_rules=None):
+                 disabled_rules=None, extra_rules=None, gate=None):
         """disabled_rules: 끌 규칙 이름 집합 — 경계 재배치 실험(M1~M4)에서 해당 기믹을
         RL 소관으로 내릴 때 사용. 규칙 이름: seal_hide/tank_guard/imminent_escape/
         brand_spread/stagger_taunt/stagger_dps/yellow_escape/rush_lure.
@@ -51,6 +51,9 @@ class BTGimmickLayer:
         self.disabled_rules = frozenset(disabled_rules or ())
         self.extra_rules = frozenset(extra_rules or ())
         self.fire_counts = {}
+        # 행동별 면허 게이트(LicenseGate). None 이면 모든 규칙이 항상 발화(고정 BT).
+        # 파티 전체가 하나의 게이트를 공유한다(면허 대상 = 정책의 기믹 수행 능력).
+        self.gate = gate
         # 검증된 전투/회피 헬퍼를 재사용(파일 수정 없이 조합). BT 는 이 헬퍼들의
         # _seal_hide/_safe_move/_maybe_guard/_brand_action/_attack_or_approach/
         # _move_toward_avoiding 만 골라 호출한다.
@@ -69,6 +72,12 @@ class BTGimmickLayer:
     def _on(self, rule: str) -> bool:
         return rule not in self.disabled_rules
 
+    def _license(self, rule: str, trial_id: str) -> bool:
+        """면허 조회 — True 면 규칙이 운전(발화), False 면 침묵하고 RL 에 위임(감사 대상)."""
+        if self.gate is None:
+            return True
+        return self.gate.allow_fire(rule, self.uid, trial_id)
+
     def _pass(self, reason: str) -> None:
         self.last_decision = {"rule": None, "fired": False, "reason": reason}
         return None
@@ -76,6 +85,8 @@ class BTGimmickLayer:
     # ── 진입점 ──
     def act(self) -> Optional[int]:
         env = self.env
+        if self.gate is not None:
+            self.gate.sync(env)      # 직전 턴 이벤트로 열린 감사 건을 판정(턴당 1회)
         u = env.units[self.uid]
         if not u.alive:
             return self._pass("dead")
@@ -84,12 +95,17 @@ class BTGimmickLayer:
 
         # 1) 전멸기 '혈월 강림' — 최종 생존 기둥 뒤 LOS 은신 (최우선)
         if self._on("seal_hide") and ap is not None and ap.mode == "seal":
-            return self._fire("seal_hide", "seal_wipe_active", self._fsm._seal_hide(u))
+            tid = "seal:%d:%d" % (id(ap), int(ap.extra.get("wave", 0)))
+            if self._license("seal_hide", tid):
+                return self._fire("seal_hide", "seal_wipe_active", self._fsm._seal_hide(u))
+            return self._pass("seal_hide_licensed")
 
         # 2) 임박 위험 — 내가 텔레그래프 안 & 현재 스텝 잔여 ≤2턴 → 최속 탈출.
         #    (여유 있으면(잔여>2) fire 안 함 → RL 이 선제 포지셔닝. NUM2.md 시나리오 B/C.)
         if self._on("imminent_escape") and ap is not None and ap.mode == "steps" and ap.turns_remaining <= 2 \
-                and any(s.contains((u.x, u.y)) for s in self._fsm._world_shapes()):
+                and any(s.contains((u.x, u.y)) for s in self._fsm._world_shapes()) \
+                and self._license("imminent_escape",
+                                  "imm:%d:%d" % (id(ap), int(ap.step_index))):
             # 탱커 가드 딜타임 예외: 피격 임박 스텝이면 GUARD 로 경감+보스 경직.
             if u.role == PartyRole.TANK:
                 g = self._fsm._maybe_guard(u)
@@ -101,12 +117,18 @@ class BTGimmickLayer:
             # 탈출로가 전부 막힘(희소) — RL 에 위임.
 
         # 3) 붉은 낙인(CRIMSON_BRAND) 산개/이격.
-        brand = self._fsm._brand_action(u) if self._on("brand_spread") else None
+        brand = None
+        if self._on("brand_spread") and ap is not None and ap.mode == "steps" \
+                and ap.pattern_id == PatternID.CRIMSON_BRAND \
+                and self._license("brand_spread", "brand:%d" % id(ap)):
+            brand = self._fsm._brand_action(u)
         if brand is not None:
             return self._fire("brand_spread", "crimson_brand_mark", brand)
 
         # 4) 무력화 그로기(stagger_active) — 근접 확보 + 딜 집중. 탱커는 TAUNT 우선.
-        if self._on("stagger_dps") and b.stagger_active:
+        if self._on("stagger_dps") and b.stagger_active \
+                and self._license("stagger_dps",
+                                  "stag:%d" % (self.gate.stagger_epoch if self.gate else 0)):
             if u.role == PartyRole.TANK \
                     and u.cooldowns.get(int(RaidActionID.TAUNT), 0) <= 0:
                 return self._fire("stagger_taunt", "stagger_window_tank", int(RaidActionID.TAUNT))
@@ -117,7 +139,8 @@ class BTGimmickLayer:
         #    (패링은 딜러 G 전용. 임박 전이라도 원 안이면 미리 빠진다.)
         if self._on("yellow_escape") and ap is not None and ap.mode == "steps" \
                 and ap.pattern_id == PatternID.YELLOW_BURST \
-                and ap.contains((u.x, u.y)):
+                and ap.contains((u.x, u.y)) \
+                and self._license("yellow_escape", "yel:%d" % id(ap)):
             mv = self._fsm._safe_move(u)
             if mv is not None:
                 return self._fire("yellow_escape", "parry_field_npc_evac", mv)
@@ -125,7 +148,8 @@ class BTGimmickLayer:
         # 6) FRENZY_RUSH 표식 대상이 나(NPC) → 기둥 방향 유도(보스 충돌 그로기).
         if self._on("rush_lure") and ap is not None and ap.mode == "steps" \
                 and ap.pattern_id == PatternID.FRENZY_RUSH \
-                and env._rush_target_uid(ap) == self.uid:
+                and env._rush_target_uid(ap) == self.uid \
+                and self._license("rush_lure", "rush:%d" % id(ap)):
             lure = self._pillar_lure_point(u)
             if lure is not None:
                 return self._fire("rush_lure", "frenzy_rush_target_self",

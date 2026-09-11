@@ -430,6 +430,26 @@ class RaidConfig:
     engage_distance: float = 5.0
     disengage_distance: float = 9.0
 
+    # ── 행동별 면허 프로토콜 (trust_gate.py) ──
+    # rule → (eps_max, theta_hand, theta_recall)
+    #   eps_max    : 감사 프로브 예산(규칙 발화 상황을 RL 에 맡겨볼 최대 확률).
+    #                협동 게임에선 섀도 평가가 불가능해 실집행으로만 신뢰를 잴 수 있으므로,
+    #                프로브 비용 = 그 행동의 실패 비용 → 실패 비용에 **역비례**로 배분한다.
+    #   theta_hand : 면허 발급(규칙 침묵) 임계 — 실패 비용에 **비례**해 높인다.
+    #   theta_recall: 면허 정지(규칙 복귀) 임계. theta_hand 와의 간격이 히스테리시스(채터링 방지).
+    # 등급: 전멸급(즉사·동시성공) > 고(광역 피해) > 중(단일 피격) > 저(기회손실)
+    license_tiers: Dict[str, Tuple[float, float, float]] = field(default_factory=lambda: {
+        "seal_hide":       (0.03, 0.95, 0.85),   # 전멸급 — 사실상 영구 보장, 최소 탐색만
+        "brand_spread":    (0.15, 0.85, 0.65),   # 고 — 파티 광역 피해
+        "yellow_escape":   (0.20, 0.80, 0.60),   # 고 — 본인 대미지 55
+        "imminent_escape": (0.30, 0.70, 0.50),   # 중 — 피격(회복 가능)
+        "rush_lure":       (0.35, 0.65, 0.45),   # 중 — 실패해도 기회손실 위주
+        "stagger_dps":     (0.50, 0.60, 0.40),   # 저 — 딜 손실만
+    })
+    license_alpha: float = 0.12               # 감사 성공 시 신뢰 상승 계수
+    license_beta: float = 0.30                # 감사 실패 시 신뢰 하락 계수 (β > α: 안전 우선)
+    license_min_audits: int = 20              # 면허 발급 최소 감사 횟수(우연한 연속 성공 차단)
+
     # ── 2계층 하이브리드(BT+RL) — Layer 2 인퍼런스 인간성 장치 (hybrid_policy.py) ──
     # (a) 관측 지연: RL 은 obs_delay_turns 턴 전 관측으로 결정(반응 지연 모사, 사람같음).
     # (b) action stickiness: 직전 이동 방향과 같은 이동 액션 로그잇 보너스(지터 억제).

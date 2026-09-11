@@ -41,6 +41,7 @@ from src.raid import (
     RaidEnv, RaidConfig, PartyRole, RaidActionID, FSMNpcPolicy,
     BTGimmickLayer, RewardComputer, build_role_net,
 )
+from src.raid.trust_gate import LicenseGate, LICENSED_RULES
 
 TRAIN_ROLES = (PartyRole.TANK, PartyRole.HEALER, PartyRole.SUPPORT)
 _MOVE_ACTIONS = [int(a) for a in (
@@ -208,7 +209,7 @@ RULE_REWARD_GROUP = {
 class RaidTrainer:
     def __init__(self, cfg: RaidConfig, tcfg: TrainCfg, device_str: str, seed: int = 0,
                  intervention_mode: str = "smdp",
-                 bt_disabled=None, bt_extra=None):
+                 bt_disabled=None, bt_extra=None, bt_mode: str = "fixed"):
         """intervention_mode — BT 개입 턴의 학습 표본 처리(제거 실험 D/E/F):
           "smdp"  (F, 기본): 개입 턴 표본 제외 + 보상을 직전 RL 결정에 누적 (현행)
           "naive" (D): BT 행동을 정책 표본처럼 버퍼에 포함(단순 혼합) — logp/V 는 현 정책으로 평가
@@ -224,13 +225,19 @@ class RaidTrainer:
         if intervention_mode not in ("smdp", "naive", "drop"):
             raise ValueError(f"unknown intervention_mode: {intervention_mode}")
         self.intervention_mode = intervention_mode
+        self.bt_mode = bt_mode
+        if bt_mode == "none":
+            bt_disabled = set(bt_disabled or ()) | set(LICENSED_RULES)
         self.bt_disabled = frozenset(bt_disabled or ())
         self.bt_extra = frozenset(bt_extra or ())
 
         self.env = RaidEnv(cfg, seed=seed)
         # combat_only 보상 + 꺼진 BT 규칙의 기믹 보상 그룹 선택 복원(RL 이 학습해야 하므로)
-        groups = {g for r in self.bt_disabled
-                  for g in [RULE_REWARD_GROUP.get(r)] if g}
+        gated = set(self.bt_disabled)
+        if bt_mode in ("adaptive", "mono"):
+            # 이양 후에는 RL 이 그 기믹을 수행해야 하므로 해당 보상을 학습 내내 활성화한다
+            gated |= set(LICENSED_RULES)
+        groups = {g for r in gated for g in [RULE_REWARD_GROUP.get(r)] if g}
         self.reward_groups = groups
         self.env.reward_computer = RewardComputer(cfg, mode="combat_only",
                                                   gimmick_groups=groups)
@@ -246,9 +253,14 @@ class RaidTrainer:
         # NPC uid ↔ role
         self.npc_uids = [i for i, r in enumerate(cfg.party_roles) if r != PartyRole.DEALER]
         self.uid_role = {i: cfg.party_roles[i] for i in self.npc_uids}
+        gate_mode = {"adaptive": "adaptive", "mono": "mono"}.get(bt_mode)
+        self.gate = (LicenseGate(cfg, self.npc_uids, mode=gate_mode,
+                                 rng=random.Random(seed + 1))
+                     if gate_mode else None)
         self.bts = {uid: BTGimmickLayer(self.env, uid,
                                         disabled_rules=self.bt_disabled,
-                                        extra_rules=self.bt_extra)
+                                        extra_rules=self.bt_extra,
+                                        gate=self.gate)
                     for uid in self.npc_uids}
         self.player = PlayerModelWrapper(self.env, cfg.player_slot, cfg, self.rng)
 
@@ -395,6 +407,8 @@ class RaidTrainer:
             for role in TRAIN_ROLES:
                 flush(role, done_flag=True)
 
+        if self.gate is not None:
+            self.gate.end_episode()
         rule_fires: Dict[str, int] = {}
         for bt in self.bts.values():
             for rule, n in bt.fire_counts.items():
@@ -411,6 +425,9 @@ class RaidTrainer:
             "rule_fires": rule_fires,
             "role_rewards": {k: round(v, 2) for k, v in role_rewards.items()},
             "tank_top_aggro_ratio": round(tank_top / max(1, total_turns), 4),
+            # 면허 프로토콜 상태(신뢰 궤적·이양/회수 사건) — 대표 그림 소스
+            "licenses": self.gate.snapshot() if self.gate is not None else None,
+            "license_events": self.gate.pop_events() if self.gate is not None else [],
         }
 
     # ── PPO 업데이트 ──
@@ -617,6 +634,10 @@ def main():
                     help="끌 BT 규칙(콤마): seal_hide,brand_spread,stagger_dps,imminent_escape,yellow_escape,rush_lure")
     ap.add_argument("--bt-extra", type=str, default="",
                     help="추가 BT 규칙(콤마): aggro_taunt (M5 역방향)")
+    ap.add_argument("--bt-mode", type=str, default="fixed",
+                    choices=["fixed", "adaptive", "mono", "none"],
+                    help="보장 계층 운영: fixed(고정 BT)/adaptive(면허 발급+회수)/"
+                         "mono(발급만, 회수 없음)/none(BT 전면 해제)")
     ap.add_argument("--run-label", type=str, default="",
                     help="실험 조건 라벨(run_meta.json/metrics.jsonl 에 기록)")
     args = ap.parse_args()
@@ -641,7 +662,8 @@ def main():
     bt_extra = {s.strip() for s in args.bt_extra.split(",") if s.strip()}
     trainer = RaidTrainer(cfg, tcfg, device_str, seed=args.seed,
                           intervention_mode=args.intervention_mode,
-                          bt_disabled=bt_disabled, bt_extra=bt_extra)
+                          bt_disabled=bt_disabled, bt_extra=bt_extra,
+                          bt_mode=args.bt_mode)
     if args.resume:
         trainer.load(args.resume)
     if args.bc_episodes > 0:
@@ -652,6 +674,10 @@ def main():
     meta = {
         "run_label": args.run_label or args.model_dir,
         "intervention_mode": args.intervention_mode,
+        "bt_mode": args.bt_mode,
+        "license_tiers": (dict(cfg.license_tiers)
+                          if args.bt_mode in ("adaptive", "mono") else None),
+        "license_alpha": cfg.license_alpha, "license_beta": cfg.license_beta,
         "bt_disabled": sorted(bt_disabled), "bt_extra": sorted(bt_extra),
         "reward_groups": sorted(trainer.reward_groups),
         "episodes": args.episodes, "bc_episodes": args.bc_episodes,
@@ -700,6 +726,8 @@ def main():
                     "tank_top_aggro_ratio": r["tank_top_aggro_ratio"],
                     "events": r["events"], "rule_fires": r["rule_fires"],
                     "role_rewards": r["role_rewards"],
+                    "licenses": r.get("licenses"),
+                    "license_events": r.get("license_events") or [],
                 }, ensure_ascii=False) + "\n")
         stats = trainer.update()
 
@@ -724,6 +752,12 @@ def main():
             last_eval = trainer.evaluate(tcfg.eval_episodes)
             spd = ep / max(1e-6, (time.time() - t0)) * 60.0
             dwr = last_eval["disp_winrate"]
+            if trainer.gate is not None:
+                snap = trainer.gate.snapshot()
+                handed = [r for r, v in snap.items() if v["handed"]]
+                tstr = ", ".join("%s:%.2f" % (r, v["T"]) for r, v in snap.items())
+                print("[LICENSE] ep=%d 개입률=%.2f 이양=%s T={%s}"
+                      % (ep, trainer.gate.intervention_ratio(), handed, tstr), flush=True)
             print(f"[EVAL] ep={ep} stage={stage} hp={cfg.boss_max_hp} "
                   f"roll_wr={roll_wr:.3f} eval_wr={last_eval['winrate']:.3f} "
                   f"kill={last_eval['avg_kill_steps']:.0f} "

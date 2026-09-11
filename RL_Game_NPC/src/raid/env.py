@@ -735,7 +735,7 @@ class RaidEnv:
                 for uid in self.units:
                     self.step_events[uid].append({"type": "parry_success", "uid": int(u.uid)})
             else:
-                self._deal_damage_to_unit(u, step.damage)
+                self._deal_damage_to_unit(u, step.damage, src="parry")
         # 남은 무장 소거(중복 방지)
         for u in self.units.values():
             u.parry_turns = 0
@@ -965,7 +965,7 @@ class RaidEnv:
                 self.step_events[uid].append({"type": "guard_success",
                                               "tank": u.uid,
                                               "stun": self.config.guard_stun_turns})
-        self._deal_damage_to_unit(u, dmg)
+        self._deal_damage_to_unit(u, dmg, src="pattern")
 
     # ── 폭주 돌진 "표식 추격 돌진" ──
     def _rush_target_uid(self, ap: ActivePattern) -> Optional[int]:
@@ -1098,7 +1098,7 @@ class RaidEnv:
         min_d = min((math.hypot(x.x - mu.x, x.y - mu.y) for x in others), default=99.0)
         if min_d >= self.config.pat_brand_escape_distance:
             # 산개 성공 — 대상만 경미 피해
-            self._deal_damage_to_unit(mu, max(1, step.damage // 4))
+            self._deal_damage_to_unit(mu, max(1, step.damage // 4), src="brand")
             self.boss.grog_turns = max(self.boss.grog_turns, self.config.brand_success_grog_turns)
             for uid in self.units:
                 self.step_events[uid].append({"type": "mechanic_success",
@@ -1106,7 +1106,7 @@ class RaidEnv:
         else:
             for u in self.units.values():
                 if u.alive and math.hypot(u.x - mu.x, u.y - mu.y) <= self.config.pat_brand_radius:
-                    self._deal_damage_to_unit(u, step.damage)
+                    self._deal_damage_to_unit(u, step.damage, src="brand")
             for uid in self.units:
                 self.step_events[uid].append({"type": "mechanic_fail",
                                               "pattern": int(PatternID.CRIMSON_BRAND)})
@@ -1154,7 +1154,7 @@ class RaidEnv:
         if ap.turns_remaining <= 0:
             for u in self.units.values():
                 if u.alive:
-                    self._deal_damage_to_unit(u, self.config.stagger_fail_damage)
+                    self._deal_damage_to_unit(u, self.config.stagger_fail_damage, src="stagger")
             for uid in self.units:
                 self.step_events[uid].append({"type": "stagger_fail"})
             self.boss.stagger_active = False
@@ -1251,7 +1251,10 @@ class RaidEnv:
                     self.step_events[uid].append({"type": "cinematic_end", "success": False})
             self.boss.active_pattern = None
 
-    def _deal_damage_to_unit(self, u: PartyUnit, amount: int):
+    def _deal_damage_to_unit(self, u: PartyUnit, amount: int, src: str = "other"):
+        """src: 피해 출처 태그(pattern/parry/brand/stagger/other).
+        행동별 면허 프로토콜의 감사가 '그 규칙의 실패로 맞은 것'만 실패로 판정하도록
+        귀속 정보를 이벤트에 싣는다(보스 평타와 장판 피격을 구분)."""
         actual = max(1, amount - u.defense)
         if u.buff_shield > 0:
             actual = int(actual * 0.7)
@@ -1260,9 +1263,10 @@ class RaidEnv:
         if u.hp <= 0:
             u.hp = 0
             u.alive = False
-            self.step_events[u.uid].append({"type": "death"})
+            self.step_events[u.uid].append({"type": "death", "src": src})
         else:
-            self.step_events[u.uid].append({"type": "damage_taken", "amount": actual})
+            self.step_events[u.uid].append({"type": "damage_taken",
+                                            "amount": actual, "src": src})
 
     # ────────────── 테스트/디버그 강제 발동 ──────────────
     def force_pattern(self, pid: PatternID):
