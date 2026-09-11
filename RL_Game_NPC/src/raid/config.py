@@ -438,17 +438,21 @@ class RaidConfig:
     #   theta_hand : 면허 발급(규칙 침묵) 임계 — 실패 비용에 **비례**해 높인다.
     #   theta_recall: 면허 정지(규칙 복귀) 임계. theta_hand 와의 간격이 히스테리시스(채터링 방지).
     # 등급: 전멸급(즉사·동시성공) > 고(광역 피해) > 중(단일 피격) > 저(기회손실)
+    # theta_recall 은 theta_hand 보다 크게 낮춘다(간격 ≈ 0.35): 신뢰 갱신의 고정점을 역산하면
+    # 정지는 "감사 성공률이 p_recall 아래로 **지속** 하락"할 때만 발생하고, 몇 번의 우발적
+    # 실패(노이즈)로는 발생하지 않는다 — 정지 트리거를 '정책 망각 감지'로 특정하기 위함.
     license_tiers: Dict[str, Tuple[float, float, float]] = field(default_factory=lambda: {
-        "seal_hide":       (0.03, 0.95, 0.85),   # 전멸급 — 사실상 영구 보장, 최소 탐색만
-        "brand_spread":    (0.15, 0.85, 0.65),   # 고 — 파티 광역 피해
-        "yellow_escape":   (0.20, 0.80, 0.60),   # 고 — 본인 대미지 55
-        "imminent_escape": (0.30, 0.70, 0.50),   # 중 — 피격(회복 가능)
-        "rush_lure":       (0.35, 0.65, 0.45),   # 중 — 실패해도 기회손실 위주
-        "stagger_dps":     (0.50, 0.60, 0.40),   # 저 — 딜 손실만
+        "seal_hide":       (0.03, 0.95, 0.60),   # 전멸급 — 사실상 영구 보장, 최소 탐색만
+        "brand_spread":    (0.15, 0.85, 0.50),   # 고 — 파티 광역 피해
+        "yellow_escape":   (0.20, 0.80, 0.45),   # 고 — 본인 대미지 55
+        "imminent_escape": (0.30, 0.70, 0.35),   # 중 — 피격(회복 가능)
+        "rush_lure":       (0.35, 0.65, 0.30),   # 중 — 실패해도 기회손실 위주
+        "stagger_dps":     (0.50, 0.60, 0.25),   # 저 — 딜 손실만
     })
     license_alpha: float = 0.12               # 감사 성공 시 신뢰 상승 계수
     license_beta: float = 0.30                # 감사 실패 시 신뢰 하락 계수 (β > α: 안전 우선)
     license_min_audits: int = 20              # 면허 발급 최소 감사 횟수(우연한 연속 성공 차단)
+    license_suspend_audits: int = 40          # 정지(회수) 후 재발급 금지 기간(감사 횟수) — 채터링 방지
 
     # ── 2계층 하이브리드(BT+RL) — Layer 2 인퍼런스 인간성 장치 (hybrid_policy.py) ──
     # (a) 관측 지연: RL 은 obs_delay_turns 턴 전 관측으로 결정(반응 지연 모사, 사람같음).

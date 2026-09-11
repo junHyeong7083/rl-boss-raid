@@ -209,7 +209,8 @@ RULE_REWARD_GROUP = {
 class RaidTrainer:
     def __init__(self, cfg: RaidConfig, tcfg: TrainCfg, device_str: str, seed: int = 0,
                  intervention_mode: str = "smdp",
-                 bt_disabled=None, bt_extra=None, bt_mode: str = "fixed"):
+                 bt_disabled=None, bt_extra=None, bt_mode: str = "fixed",
+                 gimmick_rewards: str = "auto"):
         """intervention_mode — BT 개입 턴의 학습 표본 처리(제거 실험 D/E/F):
           "smdp"  (F, 기본): 개입 턴 표본 제외 + 보상을 직전 RL 결정에 누적 (현행)
           "naive" (D): BT 행동을 정책 표본처럼 버퍼에 포함(단순 혼합) — logp/V 는 현 정책으로 평가
@@ -233,10 +234,16 @@ class RaidTrainer:
 
         self.env = RaidEnv(cfg, seed=seed)
         # combat_only 보상 + 꺼진 BT 규칙의 기믹 보상 그룹 선택 복원(RL 이 학습해야 하므로)
-        gated = set(self.bt_disabled)
-        if bt_mode in ("adaptive", "mono"):
-            # 이양 후에는 RL 이 그 기믹을 수행해야 하므로 해당 보상을 학습 내내 활성화한다
-            gated |= set(LICENSED_RULES)
+        if gimmick_rewards == "on":
+            # 면허 캠페인: 네 조건의 보상 함수를 동일하게 맞춘다(게이팅만 변인으로 남김).
+            gated = set(LICENSED_RULES)
+        elif gimmick_rewards == "off":
+            gated = set()
+        else:                                  # auto — 기존 동작
+            gated = set(self.bt_disabled)
+            if bt_mode in ("adaptive", "mono"):
+                # 이양 후에는 RL 이 그 기믹을 수행하므로 해당 보상을 학습 내내 활성화
+                gated |= set(LICENSED_RULES)
         groups = {g for r in gated for g in [RULE_REWARD_GROUP.get(r)] if g}
         self.reward_groups = groups
         self.env.reward_computer = RewardComputer(cfg, mode="combat_only",
@@ -634,6 +641,9 @@ def main():
                     help="끌 BT 규칙(콤마): seal_hide,brand_spread,stagger_dps,imminent_escape,yellow_escape,rush_lure")
     ap.add_argument("--bt-extra", type=str, default="",
                     help="추가 BT 규칙(콤마): aggro_taunt (M5 역방향)")
+    ap.add_argument("--gimmick-rewards", type=str, default="auto",
+                    choices=["auto", "on", "off"],
+                    help="기믹 보상 그룹 활성화. on=조건 무관 항상 활성(면허 캠페인의 통제 비교용)")
     ap.add_argument("--bt-mode", type=str, default="fixed",
                     choices=["fixed", "adaptive", "mono", "none"],
                     help="보장 계층 운영: fixed(고정 BT)/adaptive(면허 발급+회수)/"
@@ -663,7 +673,8 @@ def main():
     trainer = RaidTrainer(cfg, tcfg, device_str, seed=args.seed,
                           intervention_mode=args.intervention_mode,
                           bt_disabled=bt_disabled, bt_extra=bt_extra,
-                          bt_mode=args.bt_mode)
+                          bt_mode=args.bt_mode,
+                          gimmick_rewards=args.gimmick_rewards)
     if args.resume:
         trainer.load(args.resume)
     if args.bc_episodes > 0:
@@ -674,7 +685,7 @@ def main():
     meta = {
         "run_label": args.run_label or args.model_dir,
         "intervention_mode": args.intervention_mode,
-        "bt_mode": args.bt_mode,
+        "bt_mode": args.bt_mode, "gimmick_rewards": args.gimmick_rewards,
         "license_tiers": (dict(cfg.license_tiers)
                           if args.bt_mode in ("adaptive", "mono") else None),
         "license_alpha": cfg.license_alpha, "license_beta": cfg.license_beta,

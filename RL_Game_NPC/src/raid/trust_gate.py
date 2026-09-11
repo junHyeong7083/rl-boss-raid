@@ -20,6 +20,9 @@
     전멸급 97.9% … 딜손실급 78.9%).
   · 발급에는 최소 감사 횟수(license_min_audits)를 요구해 우연한 연속 성공으로 면허가
     나가는 것을 막는다.
+  · 정지(회수) 후에는 **면허 정지 기간**(license_suspend_audits 회의 감사 동안 재발급 금지)을
+    둔다. 임계 히스테리시스만으로는 신뢰가 발급/정지 경계에 걸칠 때 재발급이 반복되는
+    채터링이 생긴다(스위칭 시스템의 최소 체류시간 요건과 같은 역할).
   · 감사는 '한 턴'이 아니라 '기믹 1회(trial)' 단위로 한다 — 결과가 나중에 확정되므로
     (전멸기 웨이브 폭발, 낙인 착탄, 무력화 창 종료) 이벤트로 판정한다.
 
@@ -69,12 +72,13 @@ class RuleLicense:
     """규칙 하나의 면허 상태."""
 
     __slots__ = ("name", "eps_max", "theta_hand", "theta_recall", "alpha", "beta",
-                 "min_audits", "trust", "handed", "probes", "audits_ok", "audits_fail",
+                 "min_audits", "suspend_audits", "suspended_until",
+                 "trust", "handed", "probes", "audits_ok", "audits_fail",
                  "handovers", "recalls", "fires", "silent")
 
     def __init__(self, name: str, eps_max: float, theta_hand: float,
                  theta_recall: float, alpha: float, beta: float,
-                 min_audits: int = 20):
+                 min_audits: int = 20, suspend_audits: int = 40):
         self.name = name
         self.eps_max = eps_max
         self.theta_hand = theta_hand
@@ -82,6 +86,8 @@ class RuleLicense:
         self.alpha = alpha
         self.beta = beta
         self.min_audits = min_audits
+        self.suspend_audits = suspend_audits
+        self.suspended_until = 0        # 이 감사 횟수에 도달하기 전에는 재발급 금지
         self.trust = 0.0
         self.handed = False
         # 누적 통계(연구 로깅)
@@ -120,7 +126,8 @@ class LicenseGate:
                 rule, eps, th, tr,
                 getattr(cfg, "license_alpha", 0.12),
                 getattr(cfg, "license_beta", 0.30),
-                getattr(cfg, "license_min_audits", 20))
+                getattr(cfg, "license_min_audits", 20),
+                getattr(cfg, "license_suspend_audits", 40))
         self.trials: Dict[str, dict] = {}
         self._last_step = -1
         self._stagger_prev = False
@@ -218,19 +225,21 @@ class LicenseGate:
         self._update_license(lic)
 
     def _update_license(self, lic: RuleLicense):
+        audits = lic.audits_ok + lic.audits_fail
         if not lic.handed:
-            audits = lic.audits_ok + lic.audits_fail
-            if lic.trust >= lic.theta_hand and audits >= lic.min_audits:
+            if (lic.trust >= lic.theta_hand and audits >= lic.min_audits
+                    and audits >= lic.suspended_until):
                 lic.handed = True
                 lic.handovers += 1
                 self.events.append({"rule": lic.name, "event": "handover",
-                                    "trust": round(lic.trust, 4)})
+                                    "trust": round(lic.trust, 4), "audits": audits})
         else:
             if self.mode != "mono" and lic.trust < lic.theta_recall:
                 lic.handed = False
                 lic.recalls += 1
+                lic.suspended_until = audits + lic.suspend_audits   # 면허 정지 기간
                 self.events.append({"rule": lic.name, "event": "recall",
-                                    "trust": round(lic.trust, 4)})
+                                    "trust": round(lic.trust, 4), "audits": audits})
 
     # ── 에피소드 경계 ──
     def end_episode(self):
@@ -243,13 +252,18 @@ class LicenseGate:
 
     # ── 로깅 ──
     @staticmethod
-    def required_success_rate(theta_hand: float, alpha: float, beta: float) -> float:
-        """면허 발급에 필요한 감사 성공률(신뢰 갱신 고정점)."""
-        num = theta_hand * beta
-        return num / max(1e-9, alpha * (1.0 - theta_hand) + num)
+    def required_success_rate(theta: float, alpha: float, beta: float) -> float:
+        """임계 theta 에 대응하는 감사 성공률(신뢰 갱신 T*=pα/(pα+(1-p)β) 의 역산).
+
+        theta_hand 에 적용하면 '면허 발급에 필요한 성공률', theta_recall 에 적용하면
+        '면허 정지가 일어나는 성공률'이 된다. 두 값의 간격이 곧 노이즈 내성이며,
+        정지가 우발적 실패가 아니라 지속적 성능 하락(망각)에만 반응함을 보장한다."""
+        num = theta * beta
+        return num / max(1e-9, alpha * (1.0 - theta) + num)
 
     def snapshot(self) -> Dict[str, dict]:
         return {r: {"T": round(l.trust, 4), "handed": bool(l.handed),
+                    "susp": max(0, l.suspended_until - (l.audits_ok + l.audits_fail)),
                     "probe": l.probes, "ok": l.audits_ok, "fail": l.audits_fail,
                     "fire": l.fires, "silent": l.silent,
                     "hand_n": l.handovers, "recall_n": l.recalls}
