@@ -16,13 +16,17 @@
     성공 T += α(1-T), 실패 T *= (1-β) 의 고정점에서, 면허 발급에 필요한 감사 성공률은
         p_req(r) = θ_hand(r)·β / ( α(1-θ_hand(r)) + θ_hand(r)·β )
     로 θ_hand 에 단조 증가한다. 즉 **실패 비용이 큰 행동일수록 더 높은 신뢰도를 요구**한다는
-    설계 의도가 파라미터 한 줄이 아니라 닫힌 형태로 보장된다(α=0.12, β=0.30 기준
-    전멸급 97.9% … 딜손실급 78.9%).
+    설계 의도가 파라미터 한 줄이 아니라 닫힌 형태로 보장된다(전멸급 97.9% … 딜손실급 78.9%).
+    또한 p_req = θ(β/α) / ((1-θ) + θ(β/α)) 로 정리되어 **α, β 의 비(比)에만 의존**한다.
+    따라서 α, β 를 같은 배율로 축소하면 요구 성공률 사다리는 불변인 채 신뢰 추정기의
+    분산만 낮출 수 있다(면허가 경계에서 깜빡이는 현상 억제). 본 구현은 β/α = 2.5 를
+    유지하면서 α=0.04, β=0.10 을 쓴다.
   · 발급에는 최소 감사 횟수(license_min_audits)를 요구해 우연한 연속 성공으로 면허가
     나가는 것을 막는다.
-  · 정지(회수) 후에는 **면허 정지 기간**(license_suspend_audits 회의 감사 동안 재발급 금지)을
+  · 정지(회수) 후에는 **면허 정지 기간**(license_suspend_episodes 에피소드 동안 재발급 금지)을
     둔다. 임계 히스테리시스만으로는 신뢰가 발급/정지 경계에 걸칠 때 재발급이 반복되는
-    채터링이 생긴다(스위칭 시스템의 최소 체류시간 요건과 같은 역할).
+    채터링이 생긴다(스위칭 시스템의 최소 체류시간 요건과 같은 역할). 규칙마다 감사 빈도가
+    10배 이상 차이나므로 기간의 기준은 감사 횟수가 아니라 에피소드로 둔다.
   · 감사는 '한 턴'이 아니라 '기믹 1회(trial)' 단위로 한다 — 결과가 나중에 확정되므로
     (전멸기 웨이브 폭발, 낙인 착탄, 무력화 창 종료) 이벤트로 판정한다.
 
@@ -72,13 +76,13 @@ class RuleLicense:
     """규칙 하나의 면허 상태."""
 
     __slots__ = ("name", "eps_max", "theta_hand", "theta_recall", "alpha", "beta",
-                 "min_audits", "suspend_audits", "suspended_until",
+                 "min_audits", "suspend_eps", "suspended_until_ep",
                  "trust", "handed", "probes", "audits_ok", "audits_fail",
                  "handovers", "recalls", "fires", "silent")
 
     def __init__(self, name: str, eps_max: float, theta_hand: float,
                  theta_recall: float, alpha: float, beta: float,
-                 min_audits: int = 20, suspend_audits: int = 40):
+                 min_audits: int = 20, suspend_eps: int = 150):
         self.name = name
         self.eps_max = eps_max
         self.theta_hand = theta_hand
@@ -86,8 +90,8 @@ class RuleLicense:
         self.alpha = alpha
         self.beta = beta
         self.min_audits = min_audits
-        self.suspend_audits = suspend_audits
-        self.suspended_until = 0        # 이 감사 횟수에 도달하기 전에는 재발급 금지
+        self.suspend_eps = suspend_eps
+        self.suspended_until_ep = 0     # 이 에피소드에 도달하기 전에는 재발급 금지
         self.trust = 0.0
         self.handed = False
         # 누적 통계(연구 로깅)
@@ -124,11 +128,12 @@ class LicenseGate:
                 eps, th = 0.0, 2.0      # 프로브 없음 + 발급 불가
             self.licenses[rule] = RuleLicense(
                 rule, eps, th, tr,
-                getattr(cfg, "license_alpha", 0.12),
-                getattr(cfg, "license_beta", 0.30),
+                getattr(cfg, "license_alpha", 0.04),
+                getattr(cfg, "license_beta", 0.10),
                 getattr(cfg, "license_min_audits", 20),
-                getattr(cfg, "license_suspend_audits", 40))
+                getattr(cfg, "license_suspend_episodes", 150))
         self.trials: Dict[str, dict] = {}
+        self.episode = 0
         self._last_step = -1
         self._stagger_prev = False
         self.stagger_epoch = 0
@@ -228,7 +233,7 @@ class LicenseGate:
         audits = lic.audits_ok + lic.audits_fail
         if not lic.handed:
             if (lic.trust >= lic.theta_hand and audits >= lic.min_audits
-                    and audits >= lic.suspended_until):
+                    and self.episode >= lic.suspended_until_ep):
                 lic.handed = True
                 lic.handovers += 1
                 self.events.append({"rule": lic.name, "event": "handover",
@@ -237,7 +242,7 @@ class LicenseGate:
             if self.mode != "mono" and lic.trust < lic.theta_recall:
                 lic.handed = False
                 lic.recalls += 1
-                lic.suspended_until = audits + lic.suspend_audits   # 면허 정지 기간
+                lic.suspended_until_ep = self.episode + lic.suspend_eps   # 면허 정지 기간
                 self.events.append({"rule": lic.name, "event": "recall",
                                     "trust": round(lic.trust, 4), "audits": audits})
 
@@ -247,6 +252,7 @@ class LicenseGate:
         for key, tr in list(self.trials.items()):
             self._close(key, tr)
         self.trials.clear()
+        self.episode += 1
         self._last_step = -1
         self._stagger_prev = False
 
@@ -263,7 +269,7 @@ class LicenseGate:
 
     def snapshot(self) -> Dict[str, dict]:
         return {r: {"T": round(l.trust, 4), "handed": bool(l.handed),
-                    "susp": max(0, l.suspended_until - (l.audits_ok + l.audits_fail)),
+                    "susp": max(0, l.suspended_until_ep - self.episode),
                     "probe": l.probes, "ok": l.audits_ok, "fail": l.audits_fail,
                     "fire": l.fires, "silent": l.silent,
                     "hand_n": l.handovers, "recall_n": l.recalls}

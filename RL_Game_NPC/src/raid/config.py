@@ -449,10 +449,12 @@ class RaidConfig:
         "rush_lure":       (0.35, 0.65, 0.30),   # 중 — 실패해도 기회손실 위주
         "stagger_dps":     (0.50, 0.60, 0.25),   # 저 — 딜 손실만
     })
-    license_alpha: float = 0.12               # 감사 성공 시 신뢰 상승 계수
-    license_beta: float = 0.30                # 감사 실패 시 신뢰 하락 계수 (β > α: 안전 우선)
+    # α, β 는 비(β/α=2.5)만 요구 성공률을 결정한다 → 같은 배율로 축소해 사다리는 유지하고
+    # 신뢰 추정기의 분산만 낮춘다(면허가 경계에서 깜빡이는 현상 억제).
+    license_alpha: float = 0.04               # 감사 성공 시 신뢰 상승 계수
+    license_beta: float = 0.10                # 감사 실패 시 신뢰 하락 계수 (β > α: 안전 우선)
     license_min_audits: int = 20              # 면허 발급 최소 감사 횟수(우연한 연속 성공 차단)
-    license_suspend_audits: int = 40          # 정지(회수) 후 재발급 금지 기간(감사 횟수) — 채터링 방지
+    license_suspend_episodes: int = 150       # 정지 후 재발급 금지 기간(에피소드) — 채터링 방지
 
     # ── 2계층 하이브리드(BT+RL) — Layer 2 인퍼런스 인간성 장치 (hybrid_policy.py) ──
     # (a) 관측 지연: RL 은 obs_delay_turns 턴 전 관측으로 결정(반응 지연 모사, 사람같음).
