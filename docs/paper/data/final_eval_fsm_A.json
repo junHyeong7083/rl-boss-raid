@@ -1,0 +1,10 @@
+{
+  "winrate": 0.8,
+  "kill_steps": 827.2,
+  "gimmick": 0.7606,
+  "disp": {
+    "aggressive": 0.87,
+    "safe": 0.837,
+    "novice": 0.645
+  }
+}

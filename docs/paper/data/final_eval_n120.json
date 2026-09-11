@@ -1,0 +1,90 @@
+{
+  "C_smdp_ext": {
+    "winrate": 0.575,
+    "kill_steps": 847.6,
+    "gimmick": 0.8501,
+    "bt_ratio": 0.2447,
+    "disp": {
+      "aggressive": 0.784,
+      "safe": 0.886,
+      "novice": 0.188
+    }
+  },
+  "E_drop": {
+    "winrate": 0.5833,
+    "kill_steps": 828.0,
+    "gimmick": 0.8684,
+    "bt_ratio": 0.2441,
+    "disp": {
+      "aggressive": 0.897,
+      "safe": 0.821,
+      "novice": 0.071
+    }
+  },
+  "D_naive": {
+    "winrate": 0.0,
+    "kill_steps": 0.0,
+    "gimmick": 0.7565,
+    "bt_ratio": 0.0972,
+    "disp": {
+      "aggressive": 0.0,
+      "safe": 0.0,
+      "novice": 0.0
+    }
+  },
+  "M1_seal": {
+    "winrate": 0.0,
+    "kill_steps": 0.0,
+    "gimmick": 0.8395,
+    "bt_ratio": 0.1362,
+    "disp": {
+      "aggressive": 0.0,
+      "safe": 0.0,
+      "novice": 0.0
+    }
+  },
+  "M2_brand": {
+    "winrate": 0.575,
+    "kill_steps": 830.2,
+    "gimmick": 0.7595,
+    "bt_ratio": 0.2335,
+    "disp": {
+      "aggressive": 0.795,
+      "safe": 0.875,
+      "novice": 0.073
+    }
+  },
+  "M3_dodge": {
+    "winrate": 0.55,
+    "kill_steps": 997.6,
+    "gimmick": 0.6907,
+    "bt_ratio": 0.1656,
+    "disp": {
+      "aggressive": 0.771,
+      "safe": 0.9,
+      "novice": 0.067
+    }
+  },
+  "M4_stagger": {
+    "winrate": 0.5917,
+    "kill_steps": 965.0,
+    "gimmick": 0.8696,
+    "bt_ratio": 0.1389,
+    "disp": {
+      "aggressive": 0.842,
+      "safe": 0.837,
+      "novice": 0.077
+    }
+  },
+  "M5_aggro_bt": {
+    "winrate": 0.6167,
+    "kill_steps": 815.2,
+    "gimmick": 0.8644,
+    "bt_ratio": 0.2761,
+    "disp": {
+      "aggressive": 0.878,
+      "safe": 0.895,
+      "novice": 0.098
+    }
+  }
+}
