@@ -71,6 +71,14 @@ SCORERS: Dict[str, dict] = {
 
 LICENSED_RULES = tuple(SCORERS.keys())
 
+# 동시 성공이 필요한 협동 기믹 — 파티 전원이 함께 수행해야 성립한다(전멸기 진입, 낙인 산개).
+# 이 규칙들은 **그룹 동기 프로브**를 쓴다: 감사 회차의 위임 여부를 유닛별로 독립 결정하면
+# "나만 RL, 나머지는 규칙"인 부분 위임 상태를 재는 셈이 되어, 전원 위임 시의 성능을
+# 체계적으로 과대추정한다(실측: 낙인이 면허 발급 2 에피소드 만에 정지되는 현상이 14회 반복).
+# 따라서 기믹 1회에 대해 위임 여부를 한 번만 정해 전원에게 적용하고, 판정도 파티 전체
+# 결과(한 명이라도 실패하면 실패)로 한다.
+GROUP_RULES = frozenset({"seal_hide", "brand_spread"})
+
 
 class RuleLicense:
     """규칙 하나의 면허 상태."""
@@ -140,6 +148,11 @@ class LicenseGate:
         # 이번 에피소드에 발생한 이양/회수 이벤트(로깅)
         self.events: List[dict] = []
 
+    @staticmethod
+    def _trial_key(rule: str, uid: int):
+        """협동(동시 성공) 규칙은 파티 단위 trial(uid=-1), 개별 규칙은 유닛 단위."""
+        return (rule, -1) if rule in GROUP_RULES else (rule, uid)
+
     # ── 매 턴 1회 동기화: 직전 턴 이벤트로 열린 trial 을 채점 ──
     def sync(self, env):
         step = env.current_step
@@ -157,7 +170,12 @@ class LicenseGate:
             sc = SCORERS[rule]
             fail_src = sc.get("fail_src")
             close = False
-            for e in env.step_events.get(uid, ()):   # 그 유닛의 직전 턴 이벤트만 본다
+            # 그룹 규칙은 파티 전원의 이벤트를 합쳐 본다(한 명이라도 실패 = 그룹 실패).
+            if uid < 0:
+                evs = [e for u in self.npc_uids for e in env.step_events.get(u, ())]
+            else:
+                evs = env.step_events.get(uid, ())
+            for e in evs:
                 t = e.get("type")
                 if t in sc["fail_ev"]:
                     # 출처 필터: 그 규칙의 실패로 인한 피해만 실패로 센다
@@ -179,7 +197,7 @@ class LicenseGate:
         lic = self.licenses.get(rule)
         if lic is None:
             return True                      # 면허 관리 대상이 아닌 규칙은 항상 발화
-        key = (rule, uid)
+        key = self._trial_key(rule, uid)
         cur = self.trials.get(key)
         if cur is None or cur["id"] != trial_id:
             if cur is not None:
