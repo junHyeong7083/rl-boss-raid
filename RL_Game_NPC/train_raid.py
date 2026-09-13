@@ -641,6 +641,9 @@ def main():
                     help="끌 BT 규칙(콤마): seal_hide,brand_spread,stagger_dps,imminent_escape,yellow_escape,rush_lure")
     ap.add_argument("--bt-extra", type=str, default="",
                     help="추가 BT 규칙(콤마): aggro_taunt (M5 역방향)")
+    ap.add_argument("--curriculum-schedule", type=str, default="",
+                    help="고정 커리큘럼 승급 에피소드(콤마, 예: 1500,4000). "
+                         "지정 시 승률 트리거 대신 이 시점에 승급 — 조건 간 난이도 노출 동일화")
     ap.add_argument("--gimmick-rewards", type=str, default="auto",
                     choices=["auto", "on", "off"],
                     help="기믹 보상 그룹 활성화. on=조건 무관 항상 활성(면허 캠페인의 통제 비교용)")
@@ -663,6 +666,7 @@ def main():
         cfg.player_model_randomize = False
     tcfg = TrainCfg()
     advance_wr = args.stage_wins if args.stage_wins is not None else cfg.curriculum_advance_winrate
+    fixed_sched = ([int(x) for x in args.curriculum_schedule.split(",") if x.strip()] or None)         if args.curriculum_schedule else None
 
     stages = list(cfg.curriculum_boss_hp)
     csv_path = os.path.join(args.model_dir, "train_log.csv")
@@ -693,6 +697,7 @@ def main():
         "reward_groups": sorted(trainer.reward_groups),
         "episodes": args.episodes, "bc_episodes": args.bc_episodes,
         "seed": args.seed, "curriculum": list(stages),
+        "curriculum_schedule": fixed_sched,
         "seal": {"waves": cfg.seal_waves, "wave_turns": cfg.seal_wave_turns},
         "map": [cfg.map_width, cfg.map_height],
         "cooldowns": {"heal": cfg.skill_cooldowns.get(int(RaidActionID.HEAL)),
@@ -746,11 +751,19 @@ def main():
 
         # 커리큘럼 단계 상승
         advanced = False
-        if roll_wr >= advance_wr and stage < len(stages) - 1 \
-                and len(recent_wins) >= min(tcfg.winrate_window, 50):
+        if fixed_sched is not None:
+            # 고정 스케줄: 승률과 무관하게 정해진 에피소드에서 승급한다.
+            # 승률 트리거는 런마다 최종 난이도 진입 시점이 ep 112~3848 로 크게 흔들려(실측)
+            # 조건 간 비교를 오염시켰다 — 통제 비교에서는 고정 스케줄이 옳다.
+            should = min(sum(1 for m in fixed_sched if ep >= m), len(stages) - 1)
+        else:
+            should = stage + (1 if (roll_wr >= advance_wr
+                                    and len(recent_wins) >= min(tcfg.winrate_window, 50))
+                              else 0)
+        if should > stage and stage < len(stages) - 1:
             trainer.save_role_stage(stage, args.model_dir)
             trainer.save(os.path.join(args.model_dir, "final.pt"))
-            stage += 1
+            stage = min(should, len(stages) - 1)
             cfg.boss_max_hp = stages[stage]
             recent_wins.clear()
             advanced = True
