@@ -192,6 +192,8 @@ class RaidEnv:
         self._prev_boss_pos = (self.boss.x, self.boss.y)
         self._prev_unit_positions = {u.uid: (u.x, u.y) for u in self.units.values()}
         self.step_events = {uid: [] for uid in self.units}
+        # 이번 턴에 각 유닛이 선택한 행동 — 보상 계산이 '소극적 행동'을 식별하는 데 쓴다.
+        self.last_actions = {u.uid: int(actions.get(f"p{u.uid}", 0)) for u in self.units.values()}
         self.current_step += 1
         self._counter_success = False
         self._counter_uid = None

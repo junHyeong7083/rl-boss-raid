@@ -398,6 +398,9 @@ class RaidConfig:
     rw_danger_hit: float = -8.0
     rw_death: float = -15.0
     rw_dodge_safe: float = 1.0
+    # 소극적 행동(STAY) 페널티 — 전작(학술대회 논문)의 "제자리 대기 -0.5"와 같은 장치.
+    # 안전 거리 유지만으로 engage 보상을 챙기는 국소 최적을 깬다.
+    rw_idle_penalty: float = -0.6
 
     # 역할 보상
     rw_heal_per_hp: float = 0.5
@@ -410,7 +413,10 @@ class RaidConfig:
     # 정책으로 수렴했다(어그로 보상 +1.5 로는 피격 -4.0 을 못 이김).
     rw_hit_taken: float = -4.0
     rw_tank_hit_tanking: float = -0.5
-    rw_buff_hit: float = 2.5
+    # 버프 보상 상향(2.5→8.0): 쿨 8턴짜리 버프가 쿨 없는 평타(24딜×0.15≈3.6/턴)에
+    # 항상 지배되어 서포터가 버프를 쓰지 않던 문제(docs/진행해야할_내역1.md) 수정.
+    rw_buff_hit: float = 12.0
+    rw_buff_uptime: float = 0.10              # 버프 유지 중인 아군 1인당 매 턴(서포터 귀속)
     rw_guard_success: float = 12.0
 
     # 기믹 보상

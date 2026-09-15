@@ -119,9 +119,21 @@ class RewardComputer:
                     for e in events:
                         if e.get("type") == "buff":
                             r += cfg.rw_buff_hit
+                    # 버프 유지율 보상 — 시전 순간만 보상하면 "한 번 걸고 잊는" 정책이 되고,
+                    # 버프가 실제로 팀에 주는 가치는 유지되는 동안 발생한다.
+                    up = sum(1 for x in env.units.values()
+                             if x.alive and x.uid != u.uid
+                             and (x.buff_atk > 0 or x.buff_shield > 0))
+                    r += up * cfg.rw_buff_uptime * role_scale
                     r += dmg * 0.15 * role_scale
                 else:  # DEALER
                     r += dmg * cfg.rw_boss_damage_per_hp
+
+                # 소극적 행동 억제: 위험 밖에서 아무것도 안 하는 턴에 페널티.
+                # 서포터 정책이 STAY 92% 로 붕괴하는 현상(실측)을 막는다 — 안전 거리에서
+                # 가만히 있으면 engage 보상만 챙기고 피격은 피하는 국소 최적이 존재한다.
+                if getattr(env, "last_actions", {}).get(u.uid, -1) == 0:   # RaidActionID.STAY
+                    r += cfg.rw_idle_penalty
 
                 tanking = (u.role == PartyRole.TANK
                            and env.boss.top_aggro_uid() == u.uid)

@@ -62,7 +62,9 @@ class TrainCfg:
     clip_eps: float = 0.2
     epochs: int = 4
     batch_size: int = 512
-    entropy_coef: float = 0.01
+    # 0.01 → 0.02: 서포터/탱커 정책 엔트로피가 학습 중반 0.00 으로 붕괴하는 현상(실측,
+    # 전작 사전 실험의 엔트로피 붕괴와 동일 병리)을 억제.
+    entropy_coef: float = 0.02
     value_coef: float = 0.5
     max_grad_norm: float = 0.5
     hidden: int = 256
